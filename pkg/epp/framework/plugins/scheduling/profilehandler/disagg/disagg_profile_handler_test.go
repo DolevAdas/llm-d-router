@@ -1395,3 +1395,64 @@ func TestHandler_PreRequest_EncodeMultipleEndpoints(t *testing.T) {
 	want := net.JoinHostPort("10.0.0.1", "8000") + "," + net.JoinHostPort("10.0.0.2", "8000")
 	assert.Equal(t, want, request.Headers[routing.EncoderEndpointsHeader])
 }
+
+// TestHandler_PreRequest_LocalExecution verifies the local-prefill-affinity path: when the
+// prefill scorer selects the SAME pod as decode, the x-prefiller-host-port header is omitted
+// so the sidecar runs local prefill+decode instead of disaggregating to itself.
+func TestHandler_PreRequest_LocalExecution(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	h := NewDisaggProfileHandler("decode", "prefill", "encode", nil, nil)
+
+	flexNSN := k8stypes.NamespacedName{Namespace: "default", Name: "flex-pod"}
+	decodeEp := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: flexNSN, Address: "10.0.0.7", Port: "8000"}, nil, nil)
+	// Prefill picked the very same pod (same NamespacedName) as decode.
+	prefillEp := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{NamespacedName: flexNSN, Address: "10.0.0.7", Port: "8000"}, nil, nil)
+
+	request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{decodeEp}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{prefillEp}},
+		},
+	}
+
+	h.PreRequest(ctx, request, result)
+
+	_, present := request.Headers[routing.PrefillEndpointHeader]
+	assert.False(t, present,
+		"same-pod selection must omit the prefill header (local execution, no self-disaggregation)")
+}
+
+// TestHandler_PreRequest_DistinctPods verifies that when prefill and decode are on different
+// pods, the x-prefiller-host-port header is set as usual (true P/D disaggregation).
+func TestHandler_PreRequest_DistinctPods(t *testing.T) {
+	ctx := utils.NewTestContext(t)
+	h := NewDisaggProfileHandler("decode", "prefill", "encode", nil, nil)
+
+	decodeEp := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "decode-pod"},
+			Address:        "10.0.0.8", Port: "8000"}, nil, nil)
+	prefillEp := scheduling.NewEndpoint(
+		&fwkdl.EndpointMetadata{
+			NamespacedName: k8stypes.NamespacedName{Namespace: "default", Name: "prefill-pod"},
+			Address:        "10.0.0.9", Port: "8000"}, nil, nil)
+
+	request := &scheduling.InferenceRequest{Headers: map[string]string{}}
+	result := &scheduling.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*scheduling.ProfileRunResult{
+			"decode":  {TargetEndpoints: []scheduling.Endpoint{decodeEp}},
+			"prefill": {TargetEndpoints: []scheduling.Endpoint{prefillEp}},
+		},
+	}
+
+	h.PreRequest(ctx, request, result)
+
+	assert.Equal(t, net.JoinHostPort("10.0.0.9", "8000"),
+		request.Headers[routing.PrefillEndpointHeader],
+		"distinct prefill pod must set the prefill header (true P/D disaggregation)")
+}

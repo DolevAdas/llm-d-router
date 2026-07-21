@@ -22,6 +22,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	schedplugins "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/scorer/localprefillaffinity"
 )
 
 // ── Constants ───────────────────────────────────────────────────────────────
@@ -329,6 +330,9 @@ func (h *Handler) Pick(ctx context.Context, request *scheduling.InferenceRequest
 	if _, hasPrefillProfile := profiles[h.prefillProfile]; hasPrefillProfile {
 		if _, executed := profileResults[h.prefillProfile]; !executed {
 			if h.pdDecider != nil && h.pdDecider.disaggregate(ctx, request, decodeRes.TargetEndpoints[0]) {
+				// Store the decode-selected endpoint so the local-prefill-affinity scorer
+				// can boost it if the prompt is short enough to prefer local execution.
+				request.PutAttribute(localprefillaffinity.DecodeEndpointKey, decodeRes.TargetEndpoints[0])
 				span.SetAttributes(attribute.String("llm_d.epp.profile_handler.decision", "run_prefill"))
 				return map[string]scheduling.SchedulerProfile{h.prefillProfile: profiles[h.prefillProfile]}
 			}
@@ -431,13 +435,27 @@ func (h *Handler) PreRequest(ctx context.Context, request *scheduling.InferenceR
 			attribute.String("llm_d.epp.pd.reason", "no_prefill_profile_target_endpoints"),
 		)
 	default:
-		targetPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
-		prefillHostPort := net.JoinHostPort(targetPod.Address, targetPod.Port)
+		prefillPod := prefillProfileRunResult.TargetEndpoints[0].GetMetadata()
+		// If the prefill scorer selected the same pod as decode (local execution path),
+		// omit the x-prefiller-host-port header so the sidecar does local prefill+decode.
+		decodeResult := schedulingResult.ProfileResults[h.decodeProfile]
+		if decodeResult != nil && len(decodeResult.TargetEndpoints) > 0 {
+			decodePod := decodeResult.TargetEndpoints[0].GetMetadata()
+			if decodePod.NamespacedName == prefillPod.NamespacedName {
+				span.SetAttributes(
+					attribute.Bool("llm_d.epp.pd.disaggregation_used", false),
+					attribute.String("llm_d.epp.pd.reason", "local_execution_same_pod"),
+					attribute.String("llm_d.epp.pd.pod", decodePod.NamespacedName.String()),
+				)
+				break
+			}
+		}
+		prefillHostPort := net.JoinHostPort(prefillPod.Address, prefillPod.Port)
 		request.Headers[routing.PrefillEndpointHeader] = prefillHostPort
 		span.SetAttributes(
 			attribute.Bool("llm_d.epp.pd.disaggregation_used", true),
-			attribute.String("llm_d.epp.pd.prefill_pod_address", targetPod.Address),
-			attribute.String("llm_d.epp.pd.prefill_pod_port", targetPod.Port),
+			attribute.String("llm_d.epp.pd.prefill_pod_address", prefillPod.Address),
+			attribute.String("llm_d.epp.pd.prefill_pod_port", prefillPod.Port),
 		)
 	}
 
