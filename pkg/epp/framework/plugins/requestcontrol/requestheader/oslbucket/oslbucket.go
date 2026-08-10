@@ -16,9 +16,11 @@ limitations under the License.
 
 // Package oslbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-sequence-length (OSL) bin for a request from request-time signals
-// (enable_thinking, has_tools, thinking_budget) and publishes it as a request
-// attribute. Downstream consumers — the in-flight token estimator today, and
-// flow-control queue ordering / KV-pressure gating in the future — read it via
+// (enable_thinking, thinking_budget, has_tools, max_output_tokens, plus the
+// PR-2 signals reasoning_effort, verbosity, tool_choice, response_format and
+// continue_final_message) and publishes it as a request attribute. Downstream
+// consumers — the in-flight token estimator today, and flow-control queue
+// ordering / KV-pressure gating in the future — read it via
 // scheduling.ReadRequestAttribute to make output-length-aware decisions.
 package oslbucket
 
@@ -47,6 +49,11 @@ const (
 	// shortMaxOutputTokens is the max_output_tokens below which a request is
 	// classified SHORT on the strength of an explicit client cap alone.
 	shortMaxOutputTokens = 500
+	// longFloorTokens is the lower edge of the LONG bin. A client cap
+	// (max_output_tokens) strictly below this makes a >=2000-token generation
+	// physically impossible, so it vetoes a tentative LONG classification
+	// (the max_output_tokens "bin ceiling" — purely restrictive, high precision).
+	longFloorTokens = 2000
 )
 
 // OSLBucket is the predicted output-sequence-length category for a request,
@@ -77,15 +84,30 @@ func (b OSLBucket) String() string {
 
 // EstimateOSLBucket predicts the output-length bin using request-time signals.
 //
-// Validated on 22,575 samples across 5 real-world LLM datasets
-// (KIMI-K2.5, rStar-Coder, xlam-function-calling-60k, WildChat-4.8M,
-// Nemotron-SFT-ARC-AGI-v1):
+// Precedence (first match wins), preserving the "LONG wins over SHORT" safety —
+// over-calling LONG is the cheap error, under-calling it (a long request queued
+// as short) is the expensive one, so SHORT rules must be high-precision:
+//
+//  1. LONG pushers: enable_thinking=true · reasoning_effort=high · verbosity=high · thinking_budget>4000
+//  2. SHORT pushers: tool_choice∈{required,named} · has_tools∧¬thinking∧tool_choice≠none ·
+//     verbosity=low · continue_final_message · response_format∈{json_object,json_schema} · max_output_tokens<500
+//  3. else UNKNOWN
+//  4. bin ceiling (applied last): a max_output_tokens cap below the LONG floor vetoes LONG.
+//
+// VALIDATED signals (22,575 samples across 5 datasets — KIMI-K2.5, rStar-Coder,
+// xlam-function-calling-60k, WildChat-4.8M, Nemotron-SFT-ARC-AGI-v1):
 //
 //   - enable_thinking=true  -> LONG:  90.1% precision, 79.7% recall
 //   - enable_thinking=false AND has_tools=true -> SHORT: 100.0% precision, 56.9% recall
 //
+// PROVISIONAL signals (reasoning_effort, verbosity, tool_choice, response_format,
+// continue_final_message): no dataset records these, so their direction/precision
+// is pending a live multi-model parameter sweep (gpt-oss 120B -> Gemma -> GLM 5.2).
+// They are wired here for that measurement; any rule that fails the precision bar
+// is dropped before this branch merges. See
+// research-directions/osl-aware-scheduling/pr2-signals-design.md.
+//
 // ISL is intentionally excluded: no correlation with OSL, adds noise.
-// See research-directions/osl-aware-scheduling/README.md for full analysis.
 func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 	if body == nil {
 		return OSLBucketUnknown
@@ -94,40 +116,135 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 	var enableThinking *bool
 	var thinkingBudget *int64
 	hasTools := false
+	continueFinalMessage := false
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
+		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
-		if v, ok := kwArgs["enable_thinking"]; ok {
-			enableThinking = boolPtrFromAny(v)
+		enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+		thinkingBudget = int64PtrFromAny(kwArgs["thinking_budget"])
+	}
+
+	// PR-2 signals are OpenAI top-level body fields, not typed on the request —
+	// read them from the raw payload map (with a chat_template_kwargs fallback
+	// for the two that some vLLM chat templates relocate there).
+	var reasoningEffort, verbosity, toolChoice, responseFormat string
+	if payload, ok := payloadMap(body); ok {
+		reasoningEffort = stringSignal(payload, "reasoning_effort")
+		verbosity = stringSignal(payload, "verbosity")
+		toolChoice = toolChoiceKind(payload["tool_choice"])
+		responseFormat = responseFormatType(payload["response_format"])
+	}
+	if body.ChatCompletions != nil {
+		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
+		if reasoningEffort == "" {
+			reasoningEffort = stringSignal(kwArgs, "reasoning_effort")
 		}
-		if v, ok := kwArgs["thinking_budget"]; ok {
-			thinkingBudget = int64PtrFromAny(v)
+		if verbosity == "" {
+			verbosity = stringSignal(kwArgs, "verbosity")
 		}
 	}
+
+	bucket := classifyOSL(classifyInput{
+		enableThinking:       enableThinking,
+		thinkingBudget:       thinkingBudget,
+		hasTools:             hasTools,
+		continueFinalMessage: continueFinalMessage,
+		reasoningEffort:      reasoningEffort,
+		verbosity:            verbosity,
+		toolChoice:           toolChoice,
+		responseFormat:       responseFormat,
+		maxOutputTokens:      body.MaxOutputTokens,
+	})
+
+	// Bin ceiling (always last): a hard client cap below the LONG floor makes a
+	// LONG generation physically impossible, so downgrade. Purely restrictive.
+	return applyMaxOutputCeiling(bucket, body.MaxOutputTokens)
+}
+
+// classifyInput carries the request-time signals for the OSL classifier.
+type classifyInput struct {
+	enableThinking       *bool
+	thinkingBudget       *int64
+	hasTools             bool
+	continueFinalMessage bool
+	reasoningEffort      string
+	verbosity            string
+	toolChoice           string
+	responseFormat       string
+	maxOutputTokens      *int64
+}
+
+// classifyOSL applies the precedence cascade documented on EstimateOSLBucket.
+func classifyOSL(in classifyInput) OSLBucket {
+	thinking := in.enableThinking != nil && *in.enableThinking
+
+	// --- LONG pushers (checked first; over-calling LONG is the cheap error) ---
 
 	// Thinking mode -> always long (reasoning chains, measured p50 = 3,848-16,530 tokens).
-	if enableThinking != nil && *enableThinking {
+	if thinking {
 		return OSLBucketLong
 	}
-
+	// High reasoning effort -> long reasoning trace. [PROVISIONAL]
+	if in.reasoningEffort == "high" {
+		return OSLBucketLong
+	}
+	// Explicit high verbosity -> long answer. [PROVISIONAL]
+	if in.verbosity == "high" {
+		return OSLBucketLong
+	}
 	// Large thinking budget without explicit enable_thinking -> treat as LONG.
-	if thinkingBudget != nil && *thinkingBudget > longBudgetThresholdTokens {
+	if in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
 		return OSLBucketLong
 	}
 
-	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
-	// Guard: enable_thinking must be explicitly false or absent. Nemotron ARC-AGI proves that
-	// has_tools=true alone is NOT a SHORT signal when enable_thinking is also true.
-	if hasTools && (enableThinking == nil || !*enableThinking) {
+	// --- SHORT pushers (must be high-precision) ---
+
+	// Forced tool call -> short tool-call JSON. [PROVISIONAL]
+	if in.toolChoice == "required" || in.toolChoice == "named" {
 		return OSLBucketShort
 	}
-
+	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
+	// Guard: enable_thinking must be explicitly false or absent (Nemotron ARC-AGI proves
+	// has_tools alone is NOT a SHORT signal under thinking); and tool_choice="none" vetoes it
+	// (tools are advertised but the model is told not to call them, so the SHORT premise fails).
+	if in.hasTools && !thinking && in.toolChoice != "none" {
+		return OSLBucketShort
+	}
+	// Explicit low verbosity -> terse answer. [PROVISIONAL]
+	if in.verbosity == "low" {
+		return OSLBucketShort
+	}
+	// Continuing/completing a partially-written assistant turn -> short by construction. [PROVISIONAL]
+	if in.continueFinalMessage {
+		return OSLBucketShort
+	}
+	// Structured output (JSON) -> bounded, tends short. [PROVISIONAL]
+	if in.responseFormat == "json_object" || in.responseFormat == "json_schema" {
+		return OSLBucketShort
+	}
 	// Explicit short cap set by the client -> treat as short.
-	if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < shortMaxOutputTokens {
+	if in.maxOutputTokens != nil && *in.maxOutputTokens > 0 && *in.maxOutputTokens < shortMaxOutputTokens {
 		return OSLBucketShort
 	}
 
 	return OSLBucketUnknown
+}
+
+// applyMaxOutputCeiling downgrades a tentative LONG bin when the client's
+// max_output_tokens cap makes a LONG (>= longFloorTokens) generation impossible.
+// It only ever downgrades LONG, so it cannot lower precision on SHORT/UNKNOWN.
+func applyMaxOutputCeiling(bucket OSLBucket, maxOutputTokens *int64) OSLBucket {
+	if bucket != OSLBucketLong || maxOutputTokens == nil || *maxOutputTokens <= 0 {
+		return bucket
+	}
+	if *maxOutputTokens < shortMaxOutputTokens {
+		return OSLBucketShort
+	}
+	if *maxOutputTokens < longFloorTokens {
+		return OSLBucketUnknown
+	}
+	return bucket
 }
 
 // PluginFactory is the factory function for the OSL bucket plugin.
@@ -159,6 +276,54 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	}
 	request.PutAttribute(OSLBucketKey, EstimateOSLBucket(request.Body))
 	return nil
+}
+
+// payloadMap returns the request's raw JSON payload as a map, if it was parsed
+// into one. PR-2 signals (reasoning_effort, verbosity, tool_choice,
+// response_format) are not typed on the request body, so they are read here.
+func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
+	if body == nil || body.Payload == nil {
+		return nil, false
+	}
+	return body.Payload.AsMap()
+}
+
+// stringSignal returns m[key] as a string when it is a JSON string, else "".
+// It never panics on a nil map (a nil map read yields the zero value).
+func stringSignal(m map[string]any, key string) string {
+	return stringFromAny(m[key])
+}
+
+// stringFromAny returns v as a string when it is one, else "" ("not set").
+func stringFromAny(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// toolChoiceKind normalizes the OpenAI tool_choice field. It is either a string
+// ("none" | "auto" | "required") or an object forcing a specific function
+// ({"type":"function","function":{"name":...}}), which we report as "named".
+// Anything else yields "" ("not set").
+func toolChoiceKind(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]any:
+		// A specific tool is forced -> a short tool-call JSON response.
+		return "named"
+	}
+	return ""
+}
+
+// responseFormatType returns the response_format.type ("text" | "json_object" |
+// "json_schema") from the OpenAI response_format object, or "" if absent.
+func responseFormatType(v any) string {
+	if m, ok := v.(map[string]any); ok {
+		return stringFromAny(m["type"])
+	}
+	return ""
 }
 
 // boolPtrFromAny coerces a JSON-decoded value into a *bool. It accepts a native

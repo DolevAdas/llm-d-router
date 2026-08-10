@@ -40,6 +40,34 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 	}
 }
 
+// bodyOpts configures bodyWith for the PR-2 signal tests. The raw-payload
+// fields (reasoning_effort, verbosity, tool_choice, response_format) live in
+// payload; continueFinal and tools/kwArgs live on the typed ChatCompletions.
+type bodyOpts struct {
+	tools         []any
+	kwArgs        map[string]any
+	payload       map[string]any
+	continueFinal bool
+	maxOut        *int64
+}
+
+// bodyWith builds a request body exercising both the typed chat-completions
+// fields and the raw JSON payload map that PR-2 signals are read from.
+func bodyWith(o bodyOpts) *fwkrh.InferenceRequestBody {
+	b := &fwkrh.InferenceRequestBody{
+		ChatCompletions: &fwkrh.ChatCompletionsRequest{
+			Tools:                o.tools,
+			ChatTemplateKWArgs:   o.kwArgs,
+			ContinueFinalMessage: o.continueFinal,
+		},
+		MaxOutputTokens: o.maxOut,
+	}
+	if o.payload != nil {
+		b.Payload = fwkrh.PayloadMap(o.payload)
+	}
+	return b
+}
+
 func TestEstimateOSLBucket(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
@@ -194,4 +222,183 @@ func TestInt64PtrFromAny(t *testing.T) {
 	require.Nil(t, int64PtrFromAny("not-a-number"))
 	require.Nil(t, int64PtrFromAny(nil))
 	require.Nil(t, int64PtrFromAny(true))
+}
+
+// namedToolChoice is an OpenAI tool_choice object forcing a specific function.
+var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
+
+// TestEstimateOSLBucket_PR2Signals covers the PR-2 signals read from the raw
+// payload map (reasoning_effort, verbosity, tool_choice, response_format), the
+// typed continue_final_message, the tool_choice="none" veto, and the
+// max_output_tokens bin ceiling — plus their precedence against each other.
+func TestEstimateOSLBucket_PR2Signals(t *testing.T) {
+	oneTool := []any{map[string]any{"type": "function"}}
+
+	tests := []struct {
+		name string
+		body *fwkrh.InferenceRequestBody
+		want OSLBucket
+	}{
+		// --- LONG pushers ---
+		{
+			name: "reasoning_effort=high -> LONG",
+			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}}),
+			want: OSLBucketLong,
+		},
+		{
+			name: "reasoning_effort=medium -> UNKNOWN (only high is a signal)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "medium"}}),
+			want: OSLBucketUnknown,
+		},
+		{
+			name: "verbosity=high -> LONG",
+			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "high"}}),
+			want: OSLBucketLong,
+		},
+		{
+			name: "reasoning_effort via chat_template_kwargs fallback -> LONG",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"reasoning_effort": "high"}}),
+			want: OSLBucketLong,
+		},
+		// --- SHORT pushers ---
+		{
+			name: "tool_choice=required -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": "required"}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "tool_choice=named object -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": namedToolChoice}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "verbosity=low -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "low"}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "continue_final_message=true -> SHORT",
+			body: bodyWith(bodyOpts{continueFinal: true}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "response_format json_object -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_object"}}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "response_format json_schema -> SHORT",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_schema"}}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "response_format text -> UNKNOWN (not a SHORT signal)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "text"}}}),
+			want: OSLBucketUnknown,
+		},
+		// --- tool_choice="none" veto of the has_tools -> SHORT rule ---
+		{
+			name: "has_tools + tool_choice=none -> UNKNOWN (veto: tools won't be called)",
+			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "none"}}),
+			want: OSLBucketUnknown,
+		},
+		{
+			name: "has_tools + tool_choice=auto -> SHORT (auto does not veto)",
+			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "auto"}}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "has_tools + no tool_choice -> SHORT (existing behavior preserved)",
+			body: bodyWith(bodyOpts{tools: oneTool}),
+			want: OSLBucketShort,
+		},
+		// --- max_output_tokens bin ceiling (downgrades a tentative LONG) ---
+		{
+			name: "enable_thinking=true + max_output=1500 -> UNKNOWN (LONG vetoed by cap<2000)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(1500))}),
+			want: OSLBucketUnknown,
+		},
+		{
+			name: "enable_thinking=true + max_output=100 -> SHORT (LONG vetoed by cap<500)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(100))}),
+			want: OSLBucketShort,
+		},
+		{
+			name: "enable_thinking=true + max_output=3000 -> LONG (cap above LONG floor)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(3000))}),
+			want: OSLBucketLong,
+		},
+		{
+			name: "reasoning_effort=high + max_output=1500 -> UNKNOWN (ceiling applies to any LONG)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}, maxOut: ptr.To(int64(1500))}),
+			want: OSLBucketUnknown,
+		},
+		{
+			name: "enable_thinking=true + max_output=0 -> LONG (zero cap ignored)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(0))}),
+			want: OSLBucketLong,
+		},
+		// --- precedence: LONG pushers beat SHORT pushers ---
+		{
+			name: "reasoning_effort=high + tool_choice=required -> LONG (LONG wins)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high", "tool_choice": "required"}}),
+			want: OSLBucketLong,
+		},
+		{
+			name: "verbosity=high + continue_final_message=true -> LONG (LONG wins)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "high"}, continueFinal: true}),
+			want: OSLBucketLong,
+		},
+		{
+			name: "enable_thinking=false + reasoning_effort=high -> LONG (false doesn't block effort)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": false}, payload: map[string]any{"reasoning_effort": "high"}}),
+			want: OSLBucketLong,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := EstimateOSLBucket(tc.body)
+			require.Equal(t, tc.want, got, "got %s want %s", got, tc.want)
+		})
+	}
+}
+
+func TestApplyMaxOutputCeiling(t *testing.T) {
+	// Only LONG is ever downgraded; SHORT/UNKNOWN pass through untouched.
+	require.Equal(t, OSLBucketShort, applyMaxOutputCeiling(OSLBucketShort, ptr.To(int64(50))))
+	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketUnknown, ptr.To(int64(50))))
+	// LONG with a cap below the LONG floor is downgraded by cap size.
+	require.Equal(t, OSLBucketShort, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(499))))
+	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(500))))
+	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(1999))))
+	// LONG with a cap at/above the floor, nil, or zero is left as LONG.
+	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(2000))))
+	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, nil))
+	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(0))))
+}
+
+func TestStringFromAny(t *testing.T) {
+	require.Equal(t, "high", stringFromAny("high"))
+	require.Equal(t, "", stringFromAny(nil))
+	require.Equal(t, "", stringFromAny(42))
+	require.Equal(t, "", stringFromAny(map[string]any{"type": "function"}))
+}
+
+func TestToolChoiceKind(t *testing.T) {
+	require.Equal(t, "none", toolChoiceKind("none"))
+	require.Equal(t, "auto", toolChoiceKind("auto"))
+	require.Equal(t, "required", toolChoiceKind("required"))
+	require.Equal(t, "named", toolChoiceKind(namedToolChoice))
+	require.Equal(t, "", toolChoiceKind(nil))
+	require.Equal(t, "", toolChoiceKind(42))
+}
+
+func TestResponseFormatType(t *testing.T) {
+	require.Equal(t, "json_object", responseFormatType(map[string]any{"type": "json_object"}))
+	require.Equal(t, "json_schema", responseFormatType(map[string]any{"type": "json_schema", "json_schema": map[string]any{}}))
+	require.Equal(t, "text", responseFormatType(map[string]any{"type": "text"}))
+	require.Equal(t, "", responseFormatType(map[string]any{}))
+	require.Equal(t, "", responseFormatType("json_object"))
+	require.Equal(t, "", responseFormatType(nil))
 }
