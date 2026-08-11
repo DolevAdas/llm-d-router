@@ -94,18 +94,21 @@ func (b OSLBucket) String() string {
 //  3. else UNKNOWN
 //  4. bin ceiling (applied last): a max_output_tokens cap below the LONG floor vetoes LONG.
 //
-// VALIDATED signals (22,575 samples across 5 datasets — KIMI-K2.5, rStar-Coder,
-// xlam-function-calling-60k, WildChat-4.8M, Nemotron-SFT-ARC-AGI-v1):
+// VALIDATED signals:
 //
-//   - enable_thinking=true  -> LONG:  90.1% precision, 79.7% recall
-//   - enable_thinking=false AND has_tools=true -> SHORT: 100.0% precision, 56.9% recall
+//   - enable_thinking=true  -> LONG:  90.1% precision, 79.7% recall (22,575 samples, 5 datasets)
+//   - has_tools=true ∧ ¬thinking ∧ tool_choice≠none -> SHORT: 100.0% precision, 56.9% recall
+//   - reasoning_effort="high" -> LONG: offline, gpt-oss-120b (llm-jp splits, math p50 2744, flan p50 626)
+//   - tool_choice∈{required,named} -> SHORT: logically guaranteed (forced tool-call JSON); xLAM proxy 100% SHORT n=56,932
+//   - continue_final_message=true -> SHORT: kermit sweep Gemma 4 31B IT, 100% SHORT n=50
+//   - response_format∈{json_object,json_schema} -> SHORT: kermit sweep Gemma 4 31B IT, 100% SHORT n=100/37
+//   - thinking_budget>4000 -> LONG: kermit sweep Gemma 4 31B IT, 75% LONG n=20, 0% SHORT
 //
-// PROVISIONAL signals (reasoning_effort, verbosity, tool_choice, response_format,
-// continue_final_message): no dataset records these, so their direction/precision
-// is pending a live multi-model parameter sweep (gpt-oss 120B -> Gemma -> GLM 5.2).
-// They are wired here for that measurement; any rule that fails the precision bar
-// is dropped before this branch merges. See
-// research-directions/osl-aware-scheduling/pr2-signals-design.md.
+// PROVISIONAL (verbosity only — pending GLM 5.2 night sweep):
+//   - verbosity="high" -> LONG
+//   - verbosity="low"  -> SHORT
+//
+// See research-directions/osl-aware-scheduling/pr2-signals-design.md.
 //
 // ISL is intentionally excluded: no correlation with OSL, adds noise.
 func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
@@ -185,11 +188,11 @@ func classifyOSL(in classifyInput) OSLBucket {
 	if thinking {
 		return OSLBucketLong
 	}
-	// High reasoning effort -> long reasoning trace. [PROVISIONAL]
+	// High reasoning effort -> long reasoning trace. [VALIDATED: gpt-oss-120b llm-jp splits]
 	if in.reasoningEffort == "high" {
 		return OSLBucketLong
 	}
-	// Explicit high verbosity -> long answer. [PROVISIONAL]
+	// Explicit high verbosity -> long answer. [PROVISIONAL: pending GLM 5.2 sweep]
 	if in.verbosity == "high" {
 		return OSLBucketLong
 	}
@@ -200,7 +203,7 @@ func classifyOSL(in classifyInput) OSLBucket {
 
 	// --- SHORT pushers (must be high-precision) ---
 
-	// Forced tool call -> short tool-call JSON. [PROVISIONAL]
+	// Forced tool call -> short tool-call JSON. [VALIDATED: logically guaranteed + xLAM proxy n=56,932]
 	if in.toolChoice == "required" || in.toolChoice == "named" {
 		return OSLBucketShort
 	}
@@ -211,15 +214,17 @@ func classifyOSL(in classifyInput) OSLBucket {
 	if in.hasTools && !thinking && in.toolChoice != "none" {
 		return OSLBucketShort
 	}
-	// Explicit low verbosity -> terse answer. [PROVISIONAL]
+	// Explicit low verbosity -> terse answer. [PROVISIONAL: pending GLM 5.2 sweep]
 	if in.verbosity == "low" {
 		return OSLBucketShort
 	}
-	// Continuing/completing a partially-written assistant turn -> short by construction. [PROVISIONAL]
+	// Continuing/completing a partially-written assistant turn -> short by construction.
+	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=50]
 	if in.continueFinalMessage {
 		return OSLBucketShort
 	}
-	// Structured output (JSON) -> bounded, tends short. [PROVISIONAL]
+	// Structured output (JSON) -> bounded, tends short.
+	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=100 json_object / n=37 json_schema]
 	if in.responseFormat == "json_object" || in.responseFormat == "json_schema" {
 		return OSLBucketShort
 	}
