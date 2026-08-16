@@ -41,7 +41,7 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 }
 
 // bodyOpts configures bodyWith for the PR-2 signal tests. The raw-payload
-// fields (reasoning_effort, verbosity, tool_choice, response_format) live in
+// fields (reasoning_effort, tool_choice, response_format) live in
 // payload; continueFinal and tools/kwArgs live on the typed ChatCompletions.
 type bodyOpts struct {
 	tools         []any
@@ -74,74 +74,74 @@ func TestEstimateOSLBucket(t *testing.T) {
 	tests := []struct {
 		name string
 		body *fwkrh.InferenceRequestBody
-		want OSLBucket
+		want Bucket
 	}{
-		{name: "nil body", body: nil, want: OSLBucketUnknown},
-		{name: "empty body", body: &fwkrh.InferenceRequestBody{}, want: OSLBucketUnknown},
+		{name: "nil body", body: nil, want: Unknown},
+		{name: "empty body", body: &fwkrh.InferenceRequestBody{}, want: Unknown},
 		{
 			name: "enable_thinking=true -> LONG",
 			body: chatBody(nil, map[string]any{"enable_thinking": true}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "enable_thinking=false, no tools -> UNKNOWN",
 			body: chatBody(nil, map[string]any{"enable_thinking": false}, nil),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "has_tools=true, enable_thinking absent -> SHORT",
 			body: chatBody(oneTool, nil, nil),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "has_tools=true, enable_thinking=false -> SHORT",
 			body: chatBody(oneTool, map[string]any{"enable_thinking": false}, nil),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "has_tools=true, enable_thinking=true -> LONG (thinking overrides)",
 			body: chatBody(oneTool, map[string]any{"enable_thinking": true}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "thinking_budget>4000 without enable_thinking -> LONG",
 			body: chatBody(nil, map[string]any{"thinking_budget": float64(8000)}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "thinking_budget<=4000 -> UNKNOWN",
 			body: chatBody(nil, map[string]any{"thinking_budget": float64(4000)}, nil),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "max_output_tokens<500 -> SHORT",
 			body: chatBody(nil, nil, ptr.To(int64(100))),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "max_output_tokens=499 -> SHORT",
 			body: chatBody(nil, nil, ptr.To(int64(499))),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "max_output_tokens=500 -> UNKNOWN (boundary)",
 			body: chatBody(nil, nil, ptr.To(int64(500))),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "max_output_tokens=0 -> UNKNOWN (zero ignored)",
 			body: chatBody(nil, nil, ptr.To(int64(0))),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "enable_thinking as string \"true\" -> LONG",
 			body: chatBody(nil, map[string]any{"enable_thinking": "true"}, nil),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "no chat completions, short cap -> SHORT",
 			body: &fwkrh.InferenceRequestBody{MaxOutputTokens: ptr.To(int64(50))},
-			want: OSLBucketShort,
+			want: Short,
 		},
 	}
 
@@ -164,9 +164,9 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok, "attribute must be set")
-		require.Equal(t, OSLBucketLong, got)
+		require.Equal(t, Long, got)
 	})
 
 	t.Run("SHORT bucket published", func(t *testing.T) {
@@ -175,25 +175,25 @@ func TestPlugin_RequestHeader_PublishesAttribute(t *testing.T) {
 		}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok)
-		require.Equal(t, OSLBucketShort, got)
+		require.Equal(t, Short, got)
 	})
 
 	t.Run("UNKNOWN still published", func(t *testing.T) {
 		req := &scheduling.InferenceRequest{Body: &fwkrh.InferenceRequestBody{}}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		got, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		got, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.True(t, ok)
-		require.Equal(t, OSLBucketUnknown, got)
+		require.Equal(t, Unknown, got)
 	})
 
 	t.Run("nil body is a no-op", func(t *testing.T) {
 		req := &scheduling.InferenceRequest{}
 		require.NoError(t, plugin.RequestHeader(context.Background(), req))
 
-		_, ok := scheduling.ReadRequestAttribute[OSLBucket](req, OSLBucketKey)
+		_, ok := scheduling.ReadRequestAttribute[Bucket](req, AttributeKey)
 		require.False(t, ok, "no attribute when body is nil")
 	})
 }
@@ -228,7 +228,7 @@ func TestInt64PtrFromAny(t *testing.T) {
 var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
 
 // TestEstimateOSLBucket_PR2Signals covers the PR-2 signals read from the raw
-// payload map (reasoning_effort, verbosity, tool_choice, response_format), the
+// payload map (reasoning_effort, tool_choice, response_format), the
 // typed continue_final_message, the tool_choice="none" veto, and the
 // max_output_tokens bin ceiling — plus their precedence against each other.
 func TestEstimateOSLBucket_PR2Signals(t *testing.T) {
@@ -237,122 +237,112 @@ func TestEstimateOSLBucket_PR2Signals(t *testing.T) {
 	tests := []struct {
 		name string
 		body *fwkrh.InferenceRequestBody
-		want OSLBucket
+		want Bucket
 	}{
 		// --- LONG pushers ---
 		{
 			name: "reasoning_effort=high -> LONG",
 			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "reasoning_effort=medium -> UNKNOWN (only high is a signal)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "medium"}}),
-			want: OSLBucketUnknown,
-		},
-		{
-			name: "verbosity=high -> LONG",
-			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "high"}}),
-			want: OSLBucketLong,
+			want: Unknown,
 		},
 		{
 			name: "reasoning_effort via chat_template_kwargs fallback -> LONG",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"reasoning_effort": "high"}}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		// --- SHORT pushers ---
 		{
 			name: "tool_choice=required -> SHORT",
 			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": "required"}}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "tool_choice=named object -> SHORT",
 			body: bodyWith(bodyOpts{payload: map[string]any{"tool_choice": namedToolChoice}}),
-			want: OSLBucketShort,
-		},
-		{
-			name: "verbosity=low -> SHORT",
-			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "low"}}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "continue_final_message=true -> SHORT",
 			body: bodyWith(bodyOpts{continueFinal: true}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "response_format json_object -> SHORT",
 			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_object"}}}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "response_format json_schema -> SHORT",
 			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_schema"}}}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "response_format text -> UNKNOWN (not a SHORT signal)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "text"}}}),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		// --- tool_choice="none" veto of the has_tools -> SHORT rule ---
 		{
 			name: "has_tools + tool_choice=none -> UNKNOWN (veto: tools won't be called)",
 			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "none"}}),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "has_tools + tool_choice=auto -> SHORT (auto does not veto)",
 			body: bodyWith(bodyOpts{tools: oneTool, payload: map[string]any{"tool_choice": "auto"}}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "has_tools + no tool_choice -> SHORT (existing behavior preserved)",
 			body: bodyWith(bodyOpts{tools: oneTool}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		// --- max_output_tokens bin ceiling (downgrades a tentative LONG) ---
 		{
 			name: "enable_thinking=true + max_output=1500 -> UNKNOWN (LONG vetoed by cap<2000)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(1500))}),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "enable_thinking=true + max_output=100 -> SHORT (LONG vetoed by cap<500)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(100))}),
-			want: OSLBucketShort,
+			want: Short,
 		},
 		{
 			name: "enable_thinking=true + max_output=3000 -> LONG (cap above LONG floor)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(3000))}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
 			name: "reasoning_effort=high + max_output=1500 -> UNKNOWN (ceiling applies to any LONG)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}, maxOut: ptr.To(int64(1500))}),
-			want: OSLBucketUnknown,
+			want: Unknown,
 		},
 		{
 			name: "enable_thinking=true + max_output=0 -> LONG (zero cap ignored)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(0))}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		// --- precedence: LONG pushers beat SHORT pushers ---
 		{
 			name: "reasoning_effort=high + tool_choice=required -> LONG (LONG wins)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high", "tool_choice": "required"}}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 		{
-			name: "verbosity=high + continue_final_message=true -> LONG (LONG wins)",
-			body: bodyWith(bodyOpts{payload: map[string]any{"verbosity": "high"}, continueFinal: true}),
-			want: OSLBucketLong,
+			name: "reasoning_effort=high + continue_final_message=true -> LONG (LONG wins)",
+			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}, continueFinal: true}),
+			want: Long,
 		},
 		{
 			name: "enable_thinking=false + reasoning_effort=high -> LONG (false doesn't block effort)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": false}, payload: map[string]any{"reasoning_effort": "high"}}),
-			want: OSLBucketLong,
+			want: Long,
 		},
 	}
 
@@ -366,16 +356,16 @@ func TestEstimateOSLBucket_PR2Signals(t *testing.T) {
 
 func TestApplyMaxOutputCeiling(t *testing.T) {
 	// Only LONG is ever downgraded; SHORT/UNKNOWN pass through untouched.
-	require.Equal(t, OSLBucketShort, applyMaxOutputCeiling(OSLBucketShort, ptr.To(int64(50))))
-	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketUnknown, ptr.To(int64(50))))
+	require.Equal(t, Short, applyMaxOutputCeiling(Short, ptr.To(int64(50))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Unknown, ptr.To(int64(50))))
 	// LONG with a cap below the LONG floor is downgraded by cap size.
-	require.Equal(t, OSLBucketShort, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(499))))
-	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(500))))
-	require.Equal(t, OSLBucketUnknown, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(1999))))
+	require.Equal(t, Short, applyMaxOutputCeiling(Long, ptr.To(int64(499))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Long, ptr.To(int64(500))))
+	require.Equal(t, Unknown, applyMaxOutputCeiling(Long, ptr.To(int64(1999))))
 	// LONG with a cap at/above the floor, nil, or zero is left as LONG.
-	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(2000))))
-	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, nil))
-	require.Equal(t, OSLBucketLong, applyMaxOutputCeiling(OSLBucketLong, ptr.To(int64(0))))
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, ptr.To(int64(2000))))
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, nil))
+	require.Equal(t, Long, applyMaxOutputCeiling(Long, ptr.To(int64(0))))
 }
 
 func TestStringFromAny(t *testing.T) {

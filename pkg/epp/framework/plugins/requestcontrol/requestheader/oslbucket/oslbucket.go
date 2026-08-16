@@ -17,7 +17,7 @@ limitations under the License.
 // Package oslbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-sequence-length (OSL) bin for a request from request-time signals
 // (enable_thinking, thinking_budget, has_tools, max_output_tokens, plus the
-// PR-2 signals reasoning_effort, verbosity, tool_choice, response_format and
+// PR-2 signals reasoning_effort, tool_choice, response_format and
 // continue_final_message) and publishes it as a request attribute. Downstream
 // consumers — the in-flight token estimator today, and flow-control queue
 // ordering / KV-pressure gating in the future — read it via
@@ -35,11 +35,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
 )
 
+// AttributeKey is the request-attribute key under which this plugin publishes
+// the predicted OSL bin. Downstream consumers read it via
+// scheduling.ReadRequestAttribute[Bucket]. It is a DataKey rather than a plain
+// string because #2190 keyed the per-request attribute store by DataKey.
+var AttributeKey = plugin.NewDataKey("osl-bucket", PluginType)
+
 const (
-	// OSLBucketKey is the request-attribute key under which this plugin
-	// publishes the predicted OSL bin. Downstream consumers read it via
-	// scheduling.ReadRequestAttribute[OSLBucket].
-	OSLBucketKey = "osl-bucket"
 	// PluginType is the plugin type name used in the EPP config.
 	PluginType = "osl-bucket"
 
@@ -56,26 +58,26 @@ const (
 	longFloorTokens = 2000
 )
 
-// OSLBucket is the predicted output-sequence-length category for a request,
+// Bucket is the predicted output-sequence-length category for a request,
 // derived from request-time signals before any tokens are generated.
-type OSLBucket int8
+type Bucket int8
 
 const (
-	// OSLBucketUnknown means no reliable signal was found; consumers use their
+	// Unknown means no reliable signal was found; consumers use their
 	// own fallback (e.g. the ratio-based token estimate). It is the zero value,
 	// so a missing attribute reads as UNKNOWN.
-	OSLBucketUnknown OSLBucket = iota
-	// OSLBucketShort predicts < 500 output tokens (e.g. tool-call JSON responses).
-	OSLBucketShort
-	// OSLBucketLong predicts >= 2000 output tokens (e.g. reasoning chains).
-	OSLBucketLong
+	Unknown Bucket = iota
+	// Short predicts < 500 output tokens (e.g. tool-call JSON responses).
+	Short
+	// Long predicts >= 2000 output tokens (e.g. reasoning chains).
+	Long
 )
 
-func (b OSLBucket) String() string {
+func (b Bucket) String() string {
 	switch b {
-	case OSLBucketShort:
+	case Short:
 		return "SHORT"
-	case OSLBucketLong:
+	case Long:
 		return "LONG"
 	default:
 		return "UNKNOWN"
@@ -83,37 +85,14 @@ func (b OSLBucket) String() string {
 }
 
 // EstimateOSLBucket predicts the output-length bin using request-time signals.
-//
-// Precedence (first match wins), preserving the "LONG wins over SHORT" safety —
-// over-calling LONG is the cheap error, under-calling it (a long request queued
-// as short) is the expensive one, so SHORT rules must be high-precision:
-//
-//  1. LONG pushers: enable_thinking=true · reasoning_effort=high · verbosity=high · thinking_budget>4000
-//  2. SHORT pushers: tool_choice∈{required,named} · has_tools∧¬thinking∧tool_choice≠none ·
-//     verbosity=low · continue_final_message · response_format∈{json_object,json_schema} · max_output_tokens<500
-//  3. else UNKNOWN
-//  4. bin ceiling (applied last): a max_output_tokens cap below the LONG floor vetoes LONG.
-//
-// VALIDATED signals:
-//
-//   - enable_thinking=true  -> LONG:  90.1% precision, 79.7% recall (22,575 samples, 5 datasets)
-//   - has_tools=true ∧ ¬thinking ∧ tool_choice≠none -> SHORT: 100.0% precision, 56.9% recall
-//   - reasoning_effort="high" -> LONG: offline, gpt-oss-120b (llm-jp splits, math p50 2744, flan p50 626)
-//   - tool_choice∈{required,named} -> SHORT: logically guaranteed (forced tool-call JSON); xLAM proxy 100% SHORT n=56,932
-//   - continue_final_message=true -> SHORT: kermit sweep Gemma 4 31B IT, 100% SHORT n=50
-//   - response_format∈{json_object,json_schema} -> SHORT: kermit sweep Gemma 4 31B IT, 100% SHORT n=100/37
-//   - thinking_budget>4000 -> LONG: kermit sweep Gemma 4 31B IT, 75% LONG n=20, 0% SHORT
-//
-// PROVISIONAL (verbosity only — pending GLM 5.2 night sweep):
-//   - verbosity="high" -> LONG
-//   - verbosity="low"  -> SHORT
-//
-// See research-directions/osl-aware-scheduling/pr2-signals-design.md.
-//
-// ISL is intentionally excluded: no correlation with OSL, adds noise.
-func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
+// Precedence (first match wins): LONG pushers (enable_thinking, reasoning_effort=high,
+// thinking_budget>4000) are checked first; SHORT pushers (tool_choice, has_tools,
+// continue_final_message, response_format, max_output_tokens<500) follow; everything
+// else is UNKNOWN. A max_output_tokens cap below the LONG floor downgrades LONG last.
+// ISL is intentionally excluded — it has no correlation with OSL.
+func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) Bucket {
 	if body == nil {
-		return OSLBucketUnknown
+		return Unknown
 	}
 
 	var enableThinking *bool
@@ -130,11 +109,10 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 
 	// PR-2 signals are OpenAI top-level body fields, not typed on the request —
 	// read them from the raw payload map (with a chat_template_kwargs fallback
-	// for the two that some vLLM chat templates relocate there).
-	var reasoningEffort, verbosity, toolChoice, responseFormat string
+	// for reasoning_effort, which some vLLM chat templates relocate there).
+	var reasoningEffort, toolChoice, responseFormat string
 	if payload, ok := payloadMap(body); ok {
 		reasoningEffort = stringSignal(payload, "reasoning_effort")
-		verbosity = stringSignal(payload, "verbosity")
 		toolChoice = toolChoiceKind(payload["tool_choice"])
 		responseFormat = responseFormatType(payload["response_format"])
 	}
@@ -142,9 +120,6 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
 		if reasoningEffort == "" {
 			reasoningEffort = stringSignal(kwArgs, "reasoning_effort")
-		}
-		if verbosity == "" {
-			verbosity = stringSignal(kwArgs, "verbosity")
 		}
 	}
 
@@ -154,7 +129,6 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) OSLBucket {
 		hasTools:             hasTools,
 		continueFinalMessage: continueFinalMessage,
 		reasoningEffort:      reasoningEffort,
-		verbosity:            verbosity,
 		toolChoice:           toolChoice,
 		responseFormat:       responseFormat,
 		maxOutputTokens:      body.MaxOutputTokens,
@@ -172,82 +146,73 @@ type classifyInput struct {
 	hasTools             bool
 	continueFinalMessage bool
 	reasoningEffort      string
-	verbosity            string
 	toolChoice           string
 	responseFormat       string
 	maxOutputTokens      *int64
 }
 
 // classifyOSL applies the precedence cascade documented on EstimateOSLBucket.
-func classifyOSL(in classifyInput) OSLBucket {
+func classifyOSL(in classifyInput) Bucket {
 	thinking := in.enableThinking != nil && *in.enableThinking
 
 	// --- LONG pushers (checked first; over-calling LONG is the cheap error) ---
 
 	// Thinking mode -> always long (reasoning chains, measured p50 = 3,848-16,530 tokens).
 	if thinking {
-		return OSLBucketLong
+		return Long
 	}
 	// High reasoning effort -> long reasoning trace. [VALIDATED: gpt-oss-120b llm-jp splits]
 	if in.reasoningEffort == "high" {
-		return OSLBucketLong
-	}
-	// Explicit high verbosity -> long answer. [PROVISIONAL: pending GLM 5.2 sweep]
-	if in.verbosity == "high" {
-		return OSLBucketLong
+		return Long
 	}
 	// Large thinking budget without explicit enable_thinking -> treat as LONG.
 	if in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
-		return OSLBucketLong
+		return Long
 	}
 
 	// --- SHORT pushers (must be high-precision) ---
 
 	// Forced tool call -> short tool-call JSON. [VALIDATED: logically guaranteed + xLAM proxy n=56,932]
 	if in.toolChoice == "required" || in.toolChoice == "named" {
-		return OSLBucketShort
+		return Short
 	}
 	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
 	// Guard: enable_thinking must be explicitly false or absent (Nemotron ARC-AGI proves
 	// has_tools alone is NOT a SHORT signal under thinking); and tool_choice="none" vetoes it
 	// (tools are advertised but the model is told not to call them, so the SHORT premise fails).
 	if in.hasTools && !thinking && in.toolChoice != "none" {
-		return OSLBucketShort
-	}
-	// Explicit low verbosity -> terse answer. [PROVISIONAL: pending GLM 5.2 sweep]
-	if in.verbosity == "low" {
-		return OSLBucketShort
+		return Short
 	}
 	// Continuing/completing a partially-written assistant turn -> short by construction.
 	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=50]
 	if in.continueFinalMessage {
-		return OSLBucketShort
+		return Short
 	}
 	// Structured output (JSON) -> bounded, tends short.
 	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=100 json_object / n=37 json_schema]
 	if in.responseFormat == "json_object" || in.responseFormat == "json_schema" {
-		return OSLBucketShort
+		return Short
 	}
 	// Explicit short cap set by the client -> treat as short.
 	if in.maxOutputTokens != nil && *in.maxOutputTokens > 0 && *in.maxOutputTokens < shortMaxOutputTokens {
-		return OSLBucketShort
+		return Short
 	}
 
-	return OSLBucketUnknown
+	return Unknown
 }
 
 // applyMaxOutputCeiling downgrades a tentative LONG bin when the client's
 // max_output_tokens cap makes a LONG (>= longFloorTokens) generation impossible.
 // It only ever downgrades LONG, so it cannot lower precision on SHORT/UNKNOWN.
-func applyMaxOutputCeiling(bucket OSLBucket, maxOutputTokens *int64) OSLBucket {
-	if bucket != OSLBucketLong || maxOutputTokens == nil || *maxOutputTokens <= 0 {
+func applyMaxOutputCeiling(bucket Bucket, maxOutputTokens *int64) Bucket {
+	if bucket != Long || maxOutputTokens == nil || *maxOutputTokens <= 0 {
 		return bucket
 	}
 	if *maxOutputTokens < shortMaxOutputTokens {
-		return OSLBucketShort
+		return Short
 	}
 	if *maxOutputTokens < longFloorTokens {
-		return OSLBucketUnknown
+		return Unknown
 	}
 	return bucket
 }
@@ -279,13 +244,13 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 	if request == nil || request.Body == nil {
 		return nil
 	}
-	request.PutAttribute(OSLBucketKey, EstimateOSLBucket(request.Body))
+	request.PutAttribute(AttributeKey, EstimateOSLBucket(request.Body))
 	return nil
 }
 
 // payloadMap returns the request's raw JSON payload as a map, if it was parsed
-// into one. PR-2 signals (reasoning_effort, verbosity, tool_choice,
-// response_format) are not typed on the request body, so they are read here.
+// into one. PR-2 signals (reasoning_effort, tool_choice, response_format) are
+// not typed on the request body, so they are read here.
 func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
 	if body == nil || body.Payload == nil {
 		return nil, false

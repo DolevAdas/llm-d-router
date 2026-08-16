@@ -45,6 +45,13 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
+
+	// Pod-role label and values -- canonical definitions in
+	// pkg/epp/framework/plugins/scheduling/filter/bylabel/roles.go.
+	podRoleLabel         = "llm-d.ai/role"
+	podRolePrefill       = "prefill"
+	podRoleEncodePrefill = "encode-prefill"
+	podRoleDecode        = "decode"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -416,12 +423,13 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 	priority := strconv.Itoa(request.Objectives.Priority)
 
 	if request.Body != nil {
-		bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
-		log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
-			"requestID", request.RequestID,
-			"bucket", bucket.String(),
-			"maxOutputTokens", request.Body.MaxOutputTokens,
-		)
+		if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
+			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL estimate",
+				"requestID", request.RequestID,
+				"bucket", bucket.String(),
+				"maxOutputTokens", request.Body.MaxOutputTokens,
+			)
+		}
 	}
 
 	tracked := false
@@ -483,14 +491,49 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
-	tokens := adjustedInput
-	if p.addEstimatedOutputTokens {
-		// Output tokens are independent of the prefix-cache discount that shapes
-		// adjustedInput. EstimateOutputFromRequest derives them from the OSL bucket
-		// published as a request attribute by the osl-bucket plugin.
-		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
+
+	// In P/D disaggregation the load is role-specific:
+	//   prefill-only endpoint -> ISL (it processes the input, not the output)
+	//   decode-only endpoint  -> OSL_est (it generates the output, ISL was handled by prefill)
+	//   monolithic / combined -> ISL + OSL_est (existing behavior, no P/D split)
+	// The split is derived from the pod-role label and only activates with known roles.
+	if endpointHasPrefillOnlyRole(endpoint) {
+		return adjustedInput
 	}
-	return tokens
+
+	if p.addEstimatedOutputTokens {
+		// Output estimate is based on the OSL bucket request attribute.
+		outputTokens := p.tokenEstimator.EstimateOutputFromRequest(request)
+		if endpointHasDecodeOnlyRole(endpoint) {
+			// Decode-only endpoint: ISL was already accounted for by the prefill
+			// worker, so its in-flight load is OSL_est only.
+			return outputTokens
+		}
+		// Monolithic or combined-role endpoint: include both ISL and OSL_est.
+		return adjustedInput + outputTokens
+	}
+	return adjustedInput
+}
+
+// endpointHasPrefillOnlyRole reports whether the endpoint is labeled as a
+// prefill-only worker (including encode-prefill). Combined-role endpoints
+// (prefill-decode, both) return false -- they also do decode work.
+func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return false
+	}
+	role := endpoint.GetMetadata().Labels[podRoleLabel]
+	return role == podRolePrefill || role == podRoleEncodePrefill
+}
+
+// endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
+// decode-only worker. Combined-role endpoints (prefill-decode, both) return
+// false -- they also do prefill work.
+func endpointHasDecodeOnlyRole(endpoint fwksched.Endpoint) bool {
+	if endpoint == nil || endpoint.GetMetadata() == nil {
+		return false
+	}
+	return endpoint.GetMetadata().Labels[podRoleLabel] == podRoleDecode
 }
 
 func (p *InFlightLoadProducer) ResponseBody(
@@ -551,12 +594,13 @@ func (p *InFlightLoadProducer) ResponseBody(
 	// StartOfStream are gracefully no-op'd (LoadAndDelete miss / atomic Swap-to-0).
 	if resp.EndOfStream {
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
-			bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
-			log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
-				"requestID", request.RequestID,
-				"estimatedBucket", bucket.String(),
-				"actualCompletionTokens", resp.Usage.CompletionTokens,
-			)
+			if bucket, ok := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey); ok {
+				log.FromContext(ctx).V(logutil.VERBOSE).Info("OSL actual",
+					"requestID", request.RequestID,
+					"estimatedBucket", bucket.String(),
+					"actualCompletionTokens", resp.Usage.CompletionTokens,
+				)
+			}
 		}
 		p.PluginState.Delete(request.RequestID)
 	} else {

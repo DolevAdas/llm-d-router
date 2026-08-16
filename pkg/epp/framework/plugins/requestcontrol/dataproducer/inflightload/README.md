@@ -28,15 +28,21 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
-| `outputRatio` | `float` | No | `1.5` | Estimated output-to-input token ratio applied when `addEstimatedOutputTokens` is true: estimated output = round(inputTokens * `outputRatio`). Computed against the full prompt, not the uncached portion. Must be non-negative. |
+| `outputRatio` | `float` | No | `1.5` | Fallback output-to-input ratio for the ratio-based estimator (`Estimate`). Not used by the primary in-flight load path, which reads the OSL bucket from the `osl-bucket` plugin instead. Must be non-negative. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 
-When `addEstimatedOutputTokens` is true, the estimated output added per request is
-`min(round(inputTokens * outputRatio), clientMaxOutputTokens?, maxEstimatedOutputTokens?)`.
-The client cap is the request's own output limit (`max_tokens` /
-`max_completion_tokens` / `max_output_tokens` depending on the API), applied only
-when the client specified one. This keeps estimates realistic for high-input /
-low-output workloads, where a fixed ratio would otherwise overstate output.
+When `addEstimatedOutputTokens` is true, the output estimate for each request is
+derived from the OSL bucket attribute published by the `osl-bucket` plugin:
+
+| OSL bucket | Output estimate |
+|---|---|
+| `LONG` (reasoning chain) | 4096 tokens |
+| `SHORT` (tool-call / structured output) | 100 tokens |
+| `UNKNOWN` / not set | 1000 tokens |
+
+All estimates are bounded by the client's `max_output_tokens` cap (when set and
+positive) and the `maxEstimatedOutputTokens` operator cap. When the `osl-bucket`
+plugin is not configured, every request falls through to the `UNKNOWN` estimate.
 
 ---
 

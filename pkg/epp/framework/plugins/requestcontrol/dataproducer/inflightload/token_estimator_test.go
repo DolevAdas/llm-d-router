@@ -40,11 +40,11 @@ func tokenizedRequest(n int) *fwksched.InferenceRequest {
 
 // requestWithBucket builds a request whose OSL bucket attribute is set (as the
 // osl-bucket plugin would), plus an optional client output cap.
-func requestWithBucket(bucket oslbucket.OSLBucket, maxOut *int64) *fwksched.InferenceRequest {
+func requestWithBucket(bucket oslbucket.Bucket, maxOut *int64) *fwksched.InferenceRequest {
 	req := &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{MaxOutputTokens: maxOut},
 	}
-	req.PutAttribute(oslbucket.OSLBucketKey, bucket)
+	req.PutAttribute(oslbucket.AttributeKey, bucket)
 	return req
 }
 
@@ -236,28 +236,28 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	})
 
 	t.Run("LONG bucket → flat 4096", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.OSLBucketLong, nil)
+		req := requestWithBucket(oslbucket.Long, nil)
 		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("LONG capped by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.OSLBucketLong, ptr.To(int64(2000)))
+		req := requestWithBucket(oslbucket.Long, ptr.To(int64(2000)))
 		require.Equal(t, int64(2000), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("SHORT bucket → 100", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.OSLBucketShort, nil)
+		req := requestWithBucket(oslbucket.Short, nil)
 		require.Equal(t, int64(100), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("SHORT capped below 100 by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.OSLBucketShort, ptr.To(int64(50)))
+		req := requestWithBucket(oslbucket.Short, ptr.To(int64(50)))
 		require.Equal(t, int64(50), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("UNKNOWN bucket → flat 1000", func(t *testing.T) {
 		req := tokenizedRequest(100)
-		req.PutAttribute(oslbucket.OSLBucketKey, oslbucket.OSLBucketUnknown)
+		req.PutAttribute(oslbucket.AttributeKey, oslbucket.Unknown)
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 
@@ -267,7 +267,7 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	})
 
 	t.Run("UNKNOWN capped by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.OSLBucketUnknown, ptr.To(int64(400)))
+		req := requestWithBucket(oslbucket.Unknown, ptr.To(int64(400)))
 		require.Equal(t, int64(400), e.EstimateOutputFromRequest(req))
 	})
 }

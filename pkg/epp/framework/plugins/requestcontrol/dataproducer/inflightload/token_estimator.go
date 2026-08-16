@@ -45,21 +45,18 @@ type TokenEstimator interface {
 const DefaultOutputRatio = 1.5
 
 const (
-	// longOutputEstimateTokens is the flat output-token estimate for a LONG
-	// (reasoning) request. It is deliberately a fixed value rather than the
-	// client's thinking_budget: the estimate exists to rank requests by load,
-	// where the LONG-vs-SHORT separation dominates, not to predict exact length.
-	longOutputEstimateTokens int64 = 4096
-	// unknownOutputEstimateTokens is the flat output-token estimate for an
-	// UNKNOWN request (no OSL signal). It sits at the midpoint of the UNKNOWN
-	// zone (500–1,999 tokens), preserving the ranking invariant
-	// SHORT (100) < UNKNOWN (1000) < LONG (4096).
-	// TODO(osl): replace with a dynamic estimate (e.g. per-pool running average
-	// of observed CompletionTokens) in a follow-up PR.
-	unknownOutputEstimateTokens int64 = 1000
-	// shortOutputEstimateTokens is the flat output-token estimate for a SHORT
-	// (tool-call) request.
-	shortOutputEstimateTokens int64 = 100
+	// LongOutputTokens is the flat output-token estimate for a LONG (reasoning)
+	// request. It is a fixed value rather than the client's thinking_budget:
+	// the estimate ranks requests by load, where LONG-vs-SHORT separation
+	// dominates over exact length prediction.
+	LongOutputTokens int64 = 4096
+	// UnknownOutputTokens is the flat output-token estimate when no OSL signal
+	// is available. It preserves the ranking invariant SHORT < UNKNOWN < LONG.
+	// TODO(osl): replace with a dynamic per-pool running average in a follow-up PR.
+	UnknownOutputTokens int64 = 1000
+	// ShortOutputTokens is the flat output-token estimate for a SHORT
+	// (tool-call / structured-output) request.
+	ShortOutputTokens int64 = 100
 )
 
 // SimpleTokenEstimator derives input tokens from the tokenized prompt and
@@ -135,43 +132,43 @@ func (e *SimpleTokenEstimator) EstimateOutput(inputTokens int64, maxOutputTokens
 	return est
 }
 
-// EstimateOutputFromRequest returns the estimated output token count from the OSL
-// bucket published by the osl-bucket plugin as a request attribute. LONG requests
-// (reasoning mode) use a flat 4096-token estimate, SHORT requests (tool-call) use
-// 100, and UNKNOWN (or missing attribute) use 1000 — preserving the ranking
-// invariant SHORT < UNKNOWN < LONG. All values are bounded by the client-requested
-// cap.
+// clampOutputTokens bounds est by the client-requested cap (maxOutputTokens) and
+// the operator cap (MaxEstimatedOutputTokens).
+// MaxOutputTokens == 0 is treated as "no cap" — matching the osl-bucket
+// classifier convention; this is intentional (callers that need 0 to clamp
+// should use EstimateOutput, which applies >= 0).
+func (e *SimpleTokenEstimator) clampOutputTokens(est int64, maxOutputTokens *int64) int64 {
+	if maxOutputTokens != nil && *maxOutputTokens > 0 && *maxOutputTokens < est {
+		est = *maxOutputTokens
+	}
+	if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
+		est = *e.MaxEstimatedOutputTokens
+	}
+	return est
+}
+
+// EstimateOutputFromRequest returns the estimated output token count using the
+// OSL bucket published by the osl-bucket plugin as a request attribute
+// (LONG → LongOutputTokens, SHORT → ShortOutputTokens, UNKNOWN/missing →
+// UnknownOutputTokens), bounded by the client-requested cap.
+//
+// This method reads the osl-bucket request attribute, which is set by the
+// osl-bucket plugin's RequestHeader hook. The director guarantees that all
+// RequestHeaderProcessor hooks run before PreRequest, so the attribute is
+// always present when this is called from the in-flight load producer. If
+// osl-bucket is not configured, the attribute is absent and every request
+// falls through to UnknownOutputTokens.
 func (e *SimpleTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
 	}
-	body := request.Body
-
-	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.OSLBucket](request, oslbucket.OSLBucketKey)
+	bucket, _ := fwksched.ReadRequestAttribute[oslbucket.Bucket](request, oslbucket.AttributeKey)
 	switch bucket {
-	case oslbucket.OSLBucketLong:
-		est := longOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		if e.MaxEstimatedOutputTokens != nil && *e.MaxEstimatedOutputTokens >= 0 && *e.MaxEstimatedOutputTokens < est {
-			est = *e.MaxEstimatedOutputTokens
-		}
-		return est
-
-	case oslbucket.OSLBucketShort:
-		est := shortOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		return est
-
+	case oslbucket.Long:
+		return e.clampOutputTokens(LongOutputTokens, request.Body.MaxOutputTokens)
+	case oslbucket.Short:
+		return e.clampOutputTokens(ShortOutputTokens, request.Body.MaxOutputTokens)
 	default:
-		// OSLBucketUnknown or missing attribute: use a flat estimate.
-		est := unknownOutputEstimateTokens
-		if body.MaxOutputTokens != nil && *body.MaxOutputTokens > 0 && *body.MaxOutputTokens < est {
-			est = *body.MaxOutputTokens
-		}
-		return est
+		return e.clampOutputTokens(UnknownOutputTokens, request.Body.MaxOutputTokens)
 	}
 }

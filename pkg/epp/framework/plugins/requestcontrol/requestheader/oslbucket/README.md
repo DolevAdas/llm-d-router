@@ -27,16 +27,16 @@ for any subsystem, exactly like `agent-identity`.
 
 ## How It Works
 
-Classification (validated on 22,575 samples across 5 real-world LLM datasets;
-see `research-directions/osl-aware-scheduling/README.md`):
+Classification (first match wins):
 
-1. `enable_thinking=true` → **LONG** (reasoning mode; p50 = 3,848–16,530 tokens).
+1. `enable_thinking=true` or `reasoning_effort=high` → **LONG**.
 2. `thinking_budget > 4000` (without explicit `enable_thinking`) → **LONG**.
-3. `has_tools=true` **and** `enable_thinking` false/absent → **SHORT**
-   (tool-call JSON; p50 = 41 tokens, 100% precision). The `enable_thinking`
-   guard matters: tools alone is *not* a SHORT signal when thinking is also on.
-4. `max_output_tokens < 500` → **SHORT** (explicit client cap).
-5. Otherwise → **UNKNOWN**.
+3. `tool_choice` is `required` or a named function → **SHORT**.
+4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice ≠ none` → **SHORT**.
+5. `continue_final_message=true` → **SHORT**.
+6. `response_format` is `json_object` or `json_schema` → **SHORT**.
+7. `max_output_tokens < 500` → **SHORT** (explicit client cap).
+8. Otherwise → **UNKNOWN**.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
 explicit UNKNOWN read the same. The plugin is stateless and safe under
@@ -54,8 +54,8 @@ OSL and only adds noise.
 
 ## Outputs Produced
 
-- `scheduling.InferenceRequest` attribute `"osl-bucket"` (`oslbucket.OSLBucket`).
-  Read it with `scheduling.ReadRequestAttribute[oslbucket.OSLBucket](req, oslbucket.OSLBucketKey)`.
+- `scheduling.InferenceRequest` attribute keyed by `oslbucket.AttributeKey` (`oslbucket.Bucket` type).
+  Read it with `scheduling.ReadRequestAttribute[oslbucket.Bucket](req, oslbucket.AttributeKey)`.
 
 ## Configuration
 

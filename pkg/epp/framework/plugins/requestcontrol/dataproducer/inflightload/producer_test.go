@@ -118,7 +118,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	require.False(t, ok)
 
 	// 2. Produce with request -> should put UncachedRequestTokens
-	req := makeTokenRequest("req1", 4) // 4 input + 1000 output (UNKNOWN) = 1004 total
+	req := makeTokenRequest("req1", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens total
 	err = producer.Produce(context.Background(), req, endpoints)
 
 	require.NoError(t, err)
@@ -126,7 +126,7 @@ func TestInFlightLoadProducer_Produce(t *testing.T) {
 	val, ok := endpoint.Get(producer.uncachedRequestTokensDk)
 	require.True(t, ok)
 	uncached := val.(*attrconcurrency.UncachedRequestTokens)
-	require.Equal(t, int64(1004), uncached.Tokens)
+	require.Equal(t, int64(4+UnknownOutputTokens), uncached.Tokens)
 
 	// Verify that InFlightLoad was NOT put/overwritten by Produce
 	_, ok = endpoint.Get(producer.dk)
@@ -181,12 +181,12 @@ func TestInFlightLoadProducer_Lifecycle(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest (Inc)
-	req := makeTokenRequest("req1", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
+	req := makeTokenRequest("req1", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := makeSchedulingResult(endpointName)
 	_ = producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// 2. ResponseBody EndOfStream (Dec)
 	req.SchedulingResult = res
@@ -207,7 +207,7 @@ func TestInFlightLoadProducer_MultiPodLifecycle(t *testing.T) {
 	idB := fullEndpointName(podB)
 
 	// 1. Dispatch to PodA (Prefill) and PodB (Decode)
-	req := makeTokenRequest("multi-req", 4) // 4 input + 1000 UNKNOWN output = 1004 tokens
+	req := makeTokenRequest("multi-req", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "prefill",
 		ProfileResults: map[string]*fwksched.ProfileRunResult{
@@ -341,11 +341,11 @@ func TestInFlightLoadProducer_FlapDoesNotUnderflow(t *testing.T) {
 		},
 		{
 			name:                     "token counter, EndOfStream eviction",
-			addEstimatedOutputTokens: true, // 4 input + 1000 estimated output (UNKNOWN) = 1004 tokens per request
+			addEstimatedOutputTokens: true, // 4 input + UnknownOutputTokens output per request
 			release:                  requestcontrol.Response{EndOfStream: true},
 			read:                     tokens,
 			inputA:                   4, inputB: 4,
-			liveAfterA: 1004, liveAfterB: 1004, liveAfterReleaseA: 1004,
+			liveAfterA: 4 + UnknownOutputTokens, liveAfterB: 4 + UnknownOutputTokens, liveAfterReleaseA: 4 + UnknownOutputTokens,
 		},
 		{
 			name:    "token counter, StartOfStream early release",
@@ -706,7 +706,7 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 	// 8 input tokens. Output = 1000 (UNKNOWN flat).
 	// With block_size=4, total=2 blocks, matched=1 block (4 tokens cached):
 	//   uncached_input = (2-1)*4 + max(0, 8-2*4) = 4
-	//   total tokens = 4 + 1000 = 1004
+	//   total tokens = 4 + UnknownOutputTokens = 4+UnknownOutputTokens
 	endpoint := newStubSchedulingEndpoint(endpointName)
 	endpoint.Put(attrprefix.PrefixCacheMatchInfoDataKey, attrprefix.NewPrefixCacheMatchInfo(1, 2, 4))
 
@@ -720,8 +720,8 @@ func TestInFlightLoadProducer_PrefixCacheDiscount(t *testing.T) {
 
 	_ = producer.PreRequest(ctx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID),
-		"only uncached input (4) plus output (1000) should be tracked")
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID),
+		"only uncached input (4) plus UnknownOutputTokens output should be tracked")
 
 	// Release uses the exact stored value, returning to zero.
 	req.SchedulingResult = res
@@ -760,8 +760,8 @@ func TestInFlightLoadProducer_PrefixCacheDiscount_PerEndpoint(t *testing.T) {
 	}
 
 	_ = producer.PreRequest(ctx, req, res)
-	require.Equal(t, int64(0+1000), producer.tokenTracker.get(idA), "fully cached: only output tokens")
-	require.Equal(t, int64(8+1000), producer.tokenTracker.get(idB), "uncached: input + output")
+	require.Equal(t, int64(0+UnknownOutputTokens), producer.tokenTracker.get(idA), "fully cached: only output tokens")
+	require.Equal(t, int64(8+UnknownOutputTokens), producer.tokenTracker.get(idB), "uncached: input + output")
 
 	// Drive the response lifecycle: StartOfStream releases prefill, EndOfStream releases decode.
 	req.SchedulingResult = res
@@ -785,7 +785,7 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	endpointName := "shared-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	// 4 input + 1000 output (UNKNOWN) = 1004 tokens per profile.
+	// 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens per profile.
 	// Two profiles both targeting the same endpoint => 2 requests, 2008 tokens.
 	req := makeTokenRequest("req-shared", 4)
 	res := &fwksched.SchedulingResult{
@@ -800,11 +800,11 @@ func TestInFlightLoadProducer_BalancedAddRelease_MultipleProfilesSameEndpoint(t 
 	require.Equal(t, int64(2), producer.requestTracker.get(endpointID))
 	require.Equal(t, int64(2008), producer.tokenTracker.get(endpointID))
 
-	// StartOfStream releases the prefill profile only (1 request, 1004 tokens).
+	// StartOfStream releases the prefill profile only (1 request, 4+UnknownOutputTokens tokens).
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// EndOfStream releases the remaining (decode) profile.
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
@@ -862,12 +862,12 @@ func TestInFlightLoadProducer_Eviction(t *testing.T) {
 	endpointID := fullEndpointName(endpointName)
 
 	// 1. PreRequest: Adds load
-	req := makeTokenRequest("req-eviction", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
+	req := makeTokenRequest("req-eviction", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := makeSchedulingResult(endpointName)
 	_ = producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// 2. Explicitly delete the request (simulates what the janitor or EOS cleanup does).
 	producer.PluginState.Delete(req.RequestID)
@@ -911,12 +911,12 @@ func TestInFlightLoadProducer_LateResponseAfterReap(t *testing.T) {
 	endpointName := "late-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-late", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
+	req := makeTokenRequest("req-late", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := makeSchedulingResult(endpointName)
 	_ = producer.PreRequest(ctx, req, res)
 
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// Simulate janitor reap
 	producer.PluginState.Delete(req.RequestID)
@@ -956,17 +956,17 @@ func TestInFlightLoadProducer_JanitorSkipsLiveRequest(t *testing.T) {
 	reqCtx, reqCancel := context.WithCancel(context.Background())
 	t.Cleanup(reqCancel)
 
-	req := makeTokenRequest("req-janitor", 4) // 4 input + 1000 UNKNOWN output = 1004 tokens
+	req := makeTokenRequest("req-janitor", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := makeSchedulingResult(endpointName)
 	_ = producer.PreRequest(reqCtx, req, res)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID))
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// Several janitor sweeps past the threshold, no chunks: counters must hold.
 	time.Sleep(150 * time.Millisecond)
 	require.Equal(t, int64(1), producer.requestTracker.get(endpointID),
 		"janitor rolled back counters of a live request")
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// Ctx dies without EndOfStream (a genuinely leaked entry): the janitor
 	// reclaims it. This also proves the janitor is running in this test, so the
@@ -1013,13 +1013,13 @@ func TestInFlightLoadProducer_AtomicTokenRelease_Concurrent(t *testing.T) {
 	endpointName := "race-endpoint"
 	endpointID := fullEndpointName(endpointName)
 
-	req := makeTokenRequest("req-race", 4) // 4 input + 1000 output (UNKNOWN) = 1004 tokens
+	req := makeTokenRequest("req-race", 4) // 4 input + UnknownOutputTokens output = 4+UnknownOutputTokens tokens
 	res := makeSchedulingResult(endpointName)
 	_ = producer.PreRequest(ctx, req, res)
-	require.Equal(t, int64(1004), producer.tokenTracker.get(endpointID))
+	require.Equal(t, int64(4+UnknownOutputTokens), producer.tokenTracker.get(endpointID))
 
 	// Fire releaseTokensEarly and an explicit Delete concurrently. Whichever
-	// wins the Swap does the -1004; the other is a no-op. Net must be 0.
+	// wins the Swap does the decrement; the other is a no-op. Net must be 0.
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
@@ -1292,4 +1292,120 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		_, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(-1))})
 		require.Error(t, err)
 	})
+}
+
+// newStubSchedulingEndpointWithRole creates a stub endpoint carrying the given
+// pod-role label (values: "prefill", "decode", "encode-prefill", etc.).
+func newStubSchedulingEndpointWithRole(name, role string) *stubSchedulingEndpoint {
+	ep := newStubSchedulingEndpoint(name)
+	ep.metadata.Labels = map[string]string{podRoleLabel: role}
+	return ep
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad verifies that estimateRequestTokens
+// applies a role-based load split in P/D deployments:
+//   - prefill-only endpoint: ISL only   (output is the decode pod's cost)
+//   - decode-only endpoint:  OSL_est only (ISL was handled by the prefill pod)
+//   - no-role / combined:    ISL + OSL_est  (existing monolithic behavior)
+func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
+	t.Parallel()
+
+	// The test request carries no OSL-bucket attribute, so EstimateOutputFromRequest
+	// falls back to the flat UNKNOWN estimate (unknownOutputEstimateTokens = 1000).
+	const inputTok = 4
+	const outputTok = 1000 // UNKNOWN OSL estimate (unknownOutputEstimateTokens)
+
+	makeReq := func() *fwksched.InferenceRequest { return makeTokenRequest("r", inputTok) }
+
+	t.Run("prefill-only role -> ISL only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got)
+	})
+
+	t.Run("encode-prefill role -> ISL only", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("enc-prefill-pod", podRoleEncodePrefill)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got)
+	})
+
+	t.Run("decode-only role -> OSL_est only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(outputTok), got)
+	})
+
+	t.Run("decode-only role -> ISL only when addEstimatedOutputTokens=false", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		producer.addEstimatedOutputTokens = false
+		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok), got, "without output estimation there is no OSL signal; ISL is the only proxy")
+	})
+
+	t.Run("no role label -> ISL + OSL_est (monolithic)", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpoint("mono-pod") // no role label
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok+outputTok), got)
+	})
+
+	t.Run("combined role (prefill-decode) -> ISL + OSL_est", func(t *testing.T) {
+		t.Parallel()
+		producer := newTestProducer(t)
+		ep := newStubSchedulingEndpointWithRole("combined-pod", "prefill-decode")
+		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
+		require.Equal(t, int64(inputTok+outputTok), got)
+	})
+}
+
+// TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest verifies the end-to-end
+// token-tracking path: a P/D request with role-labeled endpoints records ISL on
+// the prefill pod and OSL_est on the decode pod.
+func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
+	t.Parallel()
+
+	producer := newTestProducer(t)
+	ctx := context.Background()
+
+	// 4 input tokens; no OSL-bucket signal -> UNKNOWN OSL estimate = 1000.
+	req := makeTokenRequest("req-pd-role", 4)
+	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
+	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+
+	res := &fwksched.SchedulingResult{
+		PrimaryProfileName: "decode",
+		ProfileResults: map[string]*fwksched.ProfileRunResult{
+			"prefill": {TargetEndpoints: []fwksched.Endpoint{prefillEP}},
+			"decode":  {TargetEndpoints: []fwksched.Endpoint{decodeEP}},
+		},
+	}
+
+	_ = producer.PreRequest(ctx, req, res)
+
+	prefillID := fullEndpointName("prefill-pod")
+	decodeID := fullEndpointName("decode-pod")
+
+	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID),
+		"prefill pod: ISL only (it processes the input)")
+	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID),
+		"decode pod: OSL_est only (it generates the output)")
+
+	// Drive lifecycle: StartOfStream releases prefill in full;
+	// EndOfStream releases decode.
+	req.SchedulingResult = res
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID), "prefill released at StartOfStream")
+	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID), "decode still holds OSL_est during generation")
+
+	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
+	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode released at EndOfStream")
 }
