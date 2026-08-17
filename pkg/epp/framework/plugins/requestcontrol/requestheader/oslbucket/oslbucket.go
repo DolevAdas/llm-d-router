@@ -63,9 +63,9 @@ const (
 type Bucket int8
 
 const (
-	// Unknown means no reliable signal was found; consumers use their
-	// own fallback (e.g. the ratio-based token estimate). It is the zero value,
-	// so a missing attribute reads as UNKNOWN.
+	// Unknown means no reliable signal was found; consumers apply their own
+	// neutral middle estimate. It is the zero value, so a missing attribute
+	// reads as Unknown.
 	Unknown Bucket = iota
 	// Short predicts < 500 output tokens (e.g. tool-call JSON responses).
 	Short
@@ -99,6 +99,10 @@ func EstimateOSLBucket(body *fwkrh.InferenceRequestBody) Bucket {
 	var thinkingBudget *int64
 	hasTools := false
 	continueFinalMessage := false
+	// has_tools, continue_final_message, enable_thinking and thinking_budget are
+	// only carried on the chat-completions shape (vLLM populates the thinking
+	// signals from the client's chat_template_kwargs / extra_body); the Claude
+	// messages and OpenAI responses shapes do not surface these signals.
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
@@ -165,8 +169,10 @@ func classifyOSL(in classifyInput) Bucket {
 	if in.reasoningEffort == "high" {
 		return Long
 	}
-	// Large thinking budget without explicit enable_thinking -> treat as LONG.
-	if in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
+	// Large thinking budget, only when enable_thinking is not explicitly set ->
+	// treat as LONG. An explicit enable_thinking=false is the stronger signal and
+	// is respected: the request falls through rather than being forced to LONG.
+	if in.enableThinking == nil && in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
 		return Long
 	}
 
@@ -296,6 +302,19 @@ func responseFormatType(v any) string {
 	return ""
 }
 
+// toJSONNumber normalizes float64 (from json.Unmarshal without UseNumber) and
+// json.Number (from a decoder with UseNumber) into a single json.Number,
+// eliminating duplicate numeric-type handling across the coercion helpers.
+func toJSONNumber(v any) (json.Number, bool) {
+	switch t := v.(type) {
+	case json.Number:
+		return t, true
+	case float64:
+		return json.Number(strconv.FormatFloat(t, 'f', -1, 64)), true
+	}
+	return "", false
+}
+
 // boolPtrFromAny coerces a JSON-decoded value into a *bool. It accepts a native
 // bool, the strings "true"/"false"/"1"/"0", and numeric 0/1 (float64 or
 // json.Number). Any other value yields nil ("not set").
@@ -307,11 +326,9 @@ func boolPtrFromAny(v any) *bool {
 		if b, err := strconv.ParseBool(t); err == nil {
 			return &b
 		}
-	case float64:
-		b := t != 0
-		return &b
-	case json.Number:
-		if f, err := t.Float64(); err == nil {
+	}
+	if n, ok := toJSONNumber(v); ok {
+		if f, err := n.Float64(); err == nil {
 			b := f != 0
 			return &b
 		}
@@ -321,25 +338,23 @@ func boolPtrFromAny(v any) *bool {
 
 // int64PtrFromAny coerces a JSON-decoded value into a *int64. It accepts
 // float64, json.Number, an integer string, and native int/int64. Any other
-// value (or a non-integral / unparseable one) yields nil ("not set").
+// value (or a non-integral / unparsable one) yields nil ("not set").
 func int64PtrFromAny(v any) *int64 {
 	switch t := v.(type) {
-	case float64:
-		i := int64(t)
-		return &i
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return &i
-		}
-	case string:
-		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
-			return &i
-		}
 	case int:
 		i := int64(t)
 		return &i
 	case int64:
 		return &t
+	case string:
+		if i, err := strconv.ParseInt(t, 10, 64); err == nil {
+			return &i
+		}
+	}
+	if n, ok := toJSONNumber(v); ok {
+		if i, err := n.Int64(); err == nil {
+			return &i
+		}
 	}
 	return nil
 }

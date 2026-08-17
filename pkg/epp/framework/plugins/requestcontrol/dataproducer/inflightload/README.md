@@ -27,22 +27,22 @@ Endpoint departure events (pod removed from the pool) are handled via the `Endpo
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. |
-| `outputRatio` | `float` | No | `1.5` | Fallback output-to-input ratio for the ratio-based estimator (`Estimate`). Not used by the primary in-flight load path, which reads the OSL bucket from the `osl-bucket` plugin instead. Must be non-negative. |
+| `addEstimatedOutputTokens` | `bool` | No | `false` | If true, adds an estimate of the generated output tokens to the in-flight counter. The estimate is read from the OSL bucket published by the `osl-bucket` plugin; enable that plugin and order it before this producer so requests are classified. |
 | `maxEstimatedOutputTokens` | `int` | No | _(none)_ | Optional upper bound on the estimated output tokens added per request when `addEstimatedOutputTokens` is true. Must be non-negative. Unset means no cap. |
 
-When `addEstimatedOutputTokens` is true, the output estimate for each request is
-derived from the OSL bucket attribute published by the `osl-bucket` plugin:
+When `addEstimatedOutputTokens` is true, the estimated output per request is a flat
+value determined by the OSL bucket published by the `osl-bucket` plugin:
 
-| OSL bucket | Output estimate |
-|---|---|
-| `LONG` (reasoning chain) | 4096 tokens |
-| `SHORT` (tool-call / structured output) | 100 tokens |
-| `UNKNOWN` / not set | 1000 tokens |
+| OSL Bucket | Estimated output tokens |
+|------------|------------------------|
+| `LONG` (reasoning chains) | 4 096 |
+| `SHORT` (tool-call JSON) | 100 |
+| `UNKNOWN` (no reliable signal) | 1 000 |
 
-All estimates are bounded by the client's `max_output_tokens` cap (when set and
-positive) and the `maxEstimatedOutputTokens` operator cap. When the `osl-bucket`
-plugin is not configured, every request falls through to the `UNKNOWN` estimate.
+The estimate is then bounded by the client-requested cap (`max_output_tokens` / `max_tokens`)
+and `maxEstimatedOutputTokens`. Ranking invariant: SHORT (100) < UNKNOWN (1 000) < LONG (4 096).
+When the `osl-bucket` plugin is not enabled, every request reads as UNKNOWN and the producer
+logs a one-time warning.
 
 ---
 
