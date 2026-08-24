@@ -24,27 +24,27 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
 // tokenizedRequest builds a request whose body carries a tokenized prompt of n tokens.
 func tokenizedRequest(n int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{make([]uint32, n)},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, n)}},
 			},
 		},
 	}
 }
 
-// requestWithBucket builds a request whose OSL bucket attribute is set (as the
-// osl-bucket plugin would), plus an optional client output cap.
-func requestWithBucket(bucket oslbucket.Bucket, maxOut *int64) *fwksched.InferenceRequest {
+// requestWithBucket builds a request whose outlen-bucket attribute is set (as the
+// outlen-bucket plugin would), plus an optional client output cap.
+func requestWithBucket(bucket outlenbucket.Bucket, maxOut *int64) *fwksched.InferenceRequest {
 	req := &fwksched.InferenceRequest{
 		Body: &fwkrh.InferenceRequestBody{MaxOutputTokens: maxOut},
 	}
-	req.PutAttribute(oslbucket.AttributeKey, bucket)
+	req.PutAttribute(outlenbucket.AttributeKey, bucket)
 	return req
 }
 
@@ -91,6 +91,8 @@ func TestSimpleTokenEstimator_EstimateInput(t *testing.T) {
 	}
 }
 
+// TestEstimateOutputFromRequest_Buckets verifies bucket-to-estimate mapping and client-cap clamping,
+// including that max_output_tokens=0 is treated as "not set" (no cap), not a clamp to 0.
 func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	e := NewSimpleTokenEstimator(nil)
 
@@ -99,40 +101,45 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 	})
 
 	t.Run("LONG bucket -> flat 4096", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("LONG capped by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Long, ptr.To(int64(2000)))
+		req := requestWithBucket(outlenbucket.Long, ptr.To(int64(2000)))
 		require.Equal(t, int64(2000), e.EstimateOutputFromRequest(req))
 	})
 
+	t.Run("LONG, max_output_tokens=0 -> no cap (0 means unset in API requests)", func(t *testing.T) {
+		req := requestWithBucket(outlenbucket.Long, ptr.To(int64(0)))
+		require.Equal(t, int64(4096), e.EstimateOutputFromRequest(req))
+	})
+
 	t.Run("SHORT bucket -> 100", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Short, nil)
+		req := requestWithBucket(outlenbucket.Short, nil)
 		require.Equal(t, int64(100), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("SHORT capped below 100 by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Short, ptr.To(int64(50)))
+		req := requestWithBucket(outlenbucket.Short, ptr.To(int64(50)))
 		require.Equal(t, int64(50), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("UNKNOWN bucket -> flat 1000", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Unknown, nil)
+		req := requestWithBucket(outlenbucket.Unknown, nil)
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("UNKNOWN capped by max_output_tokens", func(t *testing.T) {
-		req := requestWithBucket(oslbucket.Unknown, ptr.To(int64(400)))
+		req := requestWithBucket(outlenbucket.Unknown, ptr.To(int64(400)))
 		require.Equal(t, int64(400), e.EstimateOutputFromRequest(req))
 	})
 
 	// A missing attribute reads as the zero value (UNKNOWN): the estimate is the
 	// flat UNKNOWN value and does NOT scale with input length -- input tokens carry
-	// no output-length signal, which is the whole premise of the osl-bucket plugin.
+	// no output-length signal, which is the whole premise of the outlen-bucket plugin.
 	t.Run("missing attribute -> UNKNOWN 1000 (input length ignored)", func(t *testing.T) {
-		req := tokenizedRequest(100) // no osl-bucket attribute
+		req := tokenizedRequest(100) // no outlen-bucket attribute
 		require.Equal(t, int64(1000), e.EstimateOutputFromRequest(req))
 	})
 
@@ -145,19 +152,19 @@ func TestEstimateOutputFromRequest_Buckets(t *testing.T) {
 func TestEstimateOutputFromRequest_OperatorCap(t *testing.T) {
 	t.Run("LONG capped by operator cap", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(ptr.To(int64(200)))
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(200), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("operator cap 0 clamps to 0", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(ptr.To(int64(0)))
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(0), e.EstimateOutputFromRequest(req))
 	})
 
 	t.Run("client cap tighter than operator cap wins", func(t *testing.T) {
 		e := NewSimpleTokenEstimator(ptr.To(int64(300)))
-		req := requestWithBucket(oslbucket.Long, ptr.To(int64(150)))
+		req := requestWithBucket(outlenbucket.Long, ptr.To(int64(150)))
 		require.Equal(t, int64(150), e.EstimateOutputFromRequest(req))
 	})
 }

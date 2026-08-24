@@ -80,9 +80,9 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 	}
 
 	// Admission: 4 input + UnknownOutputTokens estimated output = 4+UnknownOutputTokens tokens, 1 request.
-	// The request carries no OSL-bucket attribute, so EstimateOutputFromRequest
+	// The request carries no outlen-bucket attribute, so EstimateOutputFromRequest
 	// falls back to UnknownOutputTokens. ep1 has no decode-only role label, so
-	// both ISL and OSL_est are counted.
+	// both ISL and estimated output are counted.
 	req := makeTokenRequest("req-gauge-lifecycle", 4)
 	res := makeSchedulingResult("ep1")
 	err := producer.PreRequest(ctx, req, res)
@@ -122,7 +122,7 @@ llm_d_epp_inflight_requests{endpoint_name="ep1",fairness_id="custom-tenant",name
 `
 	require.NoError(t, promtestutil.CollectAndCompare(inflightRequests, strings.NewReader(expectedRequests), "llm_d_epp_inflight_requests"))
 
-	// 1004 = 4 input tokens + UnknownOutputTokens (no osl-bucket attribute set).
+	// 1004 = 4 input tokens + UnknownOutputTokens (no outlen-bucket attribute set).
 	// Prometheus text format requires a literal value; update this if UnknownOutputTokens changes.
 	expectedTokens := `
 # HELP llm_d_epp_inflight_tokens [ALPHA] Current number of in-flight tokens per endpoint (uncached prompt tokens, optionally plus estimated output), as tracked by the in-flight load producer.

@@ -103,12 +103,13 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestattributereporter"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/agentidentity"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	disaggregatedsetrollout "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/screener/disaggregatedsetrollout"
 	testresponsereceived "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/test/responsereceived"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/anthropic"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/openai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/passthrough"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/sglanghttp"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vertexai"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmgrpc"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requesthandling/parsers/vllmhttp"
@@ -709,6 +710,7 @@ func (r *Runner) registerInTreePlugins() {
 	fwkplugin.Register(passthrough.PassthroughParserType, fwkplugin.StabilityBeta, passthrough.PassthroughParserPluginFactory)
 	fwkplugin.Register(anthropic.AnthropicParserType, fwkplugin.StabilityBeta, anthropic.AnthropicParserPluginFactory)
 	fwkplugin.Register(vllmhttp.VllmHTTPParserType, fwkplugin.StabilityBeta, vllmhttp.VllmHTTPParserPluginFactory)
+	fwkplugin.Register(sglanghttp.SGLangHTTPParserType, fwkplugin.StabilityBeta, sglanghttp.SGLangHTTPParserPluginFactory)
 	fwkplugin.Register(vertexai.VertexAIParserType, fwkplugin.StabilityBeta, vertexai.VertexAIParserPluginFactory)
 
 	// register saturation detector plugins
@@ -725,7 +727,7 @@ func (r *Runner) registerInTreePlugins() {
 	// register request header processor plugins
 	// Alpha
 	fwkplugin.Register(agentidentity.PluginType, fwkplugin.StabilityAlpha, agentidentity.PluginFactory)
-	fwkplugin.Register(oslbucket.PluginType, fwkplugin.StabilityAlpha, oslbucket.PluginFactory)
+	fwkplugin.Register(outlenbucket.PluginType, fwkplugin.StabilityAlpha, outlenbucket.PluginFactory)
 }
 
 func (r *Runner) parseConfigurationPhaseOne(ctx context.Context, opts *runserver.Options) (*configapi.EndpointPickerConfig, error) {
@@ -822,6 +824,11 @@ func (r *Runner) parseConfigurationPhaseTwo(ctx context.Context, rawConfig *conf
 
 	// The plugins will be executed in topologically sorted order to ensure that data is produced before it is consumed.
 	r.requestControlConfig.OrderDataProducerPlugins(dag)
+
+	// Derive the endpoint-scope allowed-key sets while the full plugin set,
+	// including auto-created producers, is known. A plugin missing here is
+	// confined to nothing at request time.
+	datalayer.RegisterScopeSpecs(handle.GetAllPlugins())
 
 	r.parserRegistry = cfg.ParserRegistry
 	logger.Info("loaded configuration from file/text successfully")

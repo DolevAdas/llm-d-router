@@ -41,7 +41,7 @@ import (
 	attrconcurrency "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/concurrency"
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/oslbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -62,7 +62,7 @@ func TestInFlightLoadProducer_Consumes(t *testing.T) {
 
 	deps := newTestProducer(t).Consumes()
 
-	// TokenizedPrompt is required so the data-layer DAG auto-creates a
+	// TokenizedRequest is required so the data-layer DAG auto-creates a
 	// token-producer and orders it ahead of this producer; without it the input
 	// token estimate silently reads zero.
 	require.Contains(t, deps.Required, tokenproducer.TokenizedPromptDataKey)
@@ -589,16 +589,16 @@ func (f *stubSchedulingEndpoint) Get(key fwkplugin.DataKey) (datalayer.Cloneable
 func (f *stubSchedulingEndpoint) Keys() []fwkplugin.DataKey { return f.attr.Keys() }
 
 // makeTokenRequest builds a request whose tokenized prompt carries inputTokens token IDs,
-// which is what the estimator reads to derive the input token count. No osl-bucket
+// which is what the estimator reads to derive the input token count. No outlen-bucket
 // attribute is set, so the estimator reads the request as UNKNOWN (the zero value) --
-// matching a deployment where the osl-bucket plugin is not enabled, hence the
+// matching a deployment where the outlen-bucket plugin is not enabled, hence the
 // UnknownOutputTokens output the counter-tracking tests expect.
 func makeTokenRequest(requestID string, inputTokens int) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{
 		RequestID: requestID,
 		Body: &fwkrh.InferenceRequestBody{
-			TokenizedPrompt: &fwkrh.TokenizedPrompt{
-				PerPromptTokens: [][]uint32{make([]uint32, inputTokens)},
+			TokenizedRequest: &fwkrh.TokenizedRequest{
+				Prompts: []fwkrh.PromptTokens{{TokenIDs: make([]uint32, inputTokens)}},
 			},
 		},
 	}
@@ -1242,7 +1242,7 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(40))})
 		require.NoError(t, err)
 		// LONG bucket estimates 4096, capped to the operator cap of 40.
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(40), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
@@ -1251,7 +1251,7 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 		p, err := newProducer(t, Config{AddEstimatedOutputTokens: true, MaxEstimatedOutputTokens: ptr.To(int64(5000))})
 		require.NoError(t, err)
 		// LONG bucket estimates 4096, below the operator cap of 5000.
-		req := requestWithBucket(oslbucket.Long, nil)
+		req := requestWithBucket(outlenbucket.Long, nil)
 		require.Equal(t, int64(4096), p.tokenEstimator.EstimateOutputFromRequest(req))
 	})
 
@@ -1273,15 +1273,15 @@ func newStubSchedulingEndpointWithRole(name, role string) *stubSchedulingEndpoin
 // TestInFlightLoadProducer_PDRoleAwareLoad verifies that estimateRequestTokens
 // applies a role-based load split in P/D deployments:
 //   - prefill-only endpoint: ISL only   (output is the decode pod's cost)
-//   - decode-only endpoint:  OSL_est only (ISL was handled by the prefill pod)
-//   - no-role / combined:    ISL + OSL_est  (existing monolithic behavior)
+//   - decode-only endpoint:  estimated output only (ISL was handled by the prefill pod)
+//   - no-role / combined:    ISL + estimated output  (existing monolithic behavior)
 func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 	t.Parallel()
 
-	// The test request carries no OSL-bucket attribute, so EstimateOutputFromRequest
-	// falls back to the flat UNKNOWN estimate (unknownOutputEstimateTokens = 1000).
+	// The test request carries no outlen-bucket attribute, so EstimateOutputFromRequest
+	// falls back to the flat UNKNOWN estimate (UnknownOutputTokens = 1000).
 	const inputTok = 4
-	const outputTok = 1000 // UNKNOWN OSL estimate (unknownOutputEstimateTokens)
+	const outputTok = 1000 // UNKNOWN estimate (UnknownOutputTokens)
 
 	makeReq := func() *fwksched.InferenceRequest { return makeTokenRequest("r", inputTok) }
 
@@ -1301,7 +1301,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		require.Equal(t, int64(inputTok), got)
 	})
 
-	t.Run("decode-only role -> OSL_est only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+	t.Run("decode-only role -> estimated output only (addEstimatedOutputTokens=true)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
@@ -1315,10 +1315,10 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		producer.addEstimatedOutputTokens = false
 		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
 		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
-		require.Equal(t, int64(inputTok), got, "without output estimation there is no OSL signal; ISL is the only proxy")
+		require.Equal(t, int64(inputTok), got, "without output estimation there is no output-length signal; ISL is the only proxy")
 	})
 
-	t.Run("no role label -> ISL + OSL_est (monolithic)", func(t *testing.T) {
+	t.Run("no role label -> ISL + estimated output (monolithic)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpoint("mono-pod") // no role label
@@ -1326,7 +1326,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		require.Equal(t, int64(inputTok+outputTok), got)
 	})
 
-	t.Run("combined role (prefill-decode) -> ISL + OSL_est", func(t *testing.T) {
+	t.Run("combined role (prefill-decode) -> ISL + estimated output", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("combined-pod", "prefill-decode")
@@ -1337,14 +1337,14 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 
 // TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest verifies the end-to-end
 // token-tracking path: a P/D request with role-labeled endpoints records ISL on
-// the prefill pod and OSL_est on the decode pod.
+// the prefill pod and the estimated output on the decode pod.
 func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t)
 	ctx := context.Background()
 
-	// 4 input tokens; no OSL-bucket signal -> UNKNOWN OSL estimate = 1000.
+	// 4 input tokens; no outlen-bucket signal -> UNKNOWN estimate = 1000.
 	req := makeTokenRequest("req-pd-role", 4)
 	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
 	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
@@ -1365,42 +1365,42 @@ func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID),
 		"prefill pod: ISL only (it processes the input)")
 	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID),
-		"decode pod: OSL_est only (it generates the output)")
+		"decode pod: estimated output only (it generates the output)")
 
 	// Drive lifecycle: StartOfStream releases prefill in full;
 	// EndOfStream releases decode.
 	req.SchedulingResult = res
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{StartOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.tokenTracker.get(prefillID), "prefill released at StartOfStream")
-	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID), "decode still holds OSL_est during generation")
+	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID), "decode still holds the estimated output during generation")
 
 	producer.ResponseBody(ctx, req, &requestcontrol.Response{EndOfStream: true}, nil)
 	require.Equal(t, int64(0), producer.tokenTracker.get(decodeID), "decode released at EndOfStream")
 }
 
-// TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket verifies that when
-// AddEstimatedOutputTokens is enabled but requests carry no osl-bucket attribute
-// (the osl-bucket plugin is not enabled), the producer logs the misconfiguration
+// TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket verifies that when
+// AddEstimatedOutputTokens is enabled but requests carry no outlen-bucket attribute
+// (the outlen-bucket plugin is not enabled), the producer logs the misconfiguration
 // warning exactly once across many requests, not per request.
-func TestInFlightLoadProducer_WarnsOnceOnMissingOSLBucket(t *testing.T) {
+func TestInFlightLoadProducer_WarnsOnceOnMissingOutlenBucket(t *testing.T) {
 	t.Parallel()
 
 	producer := newTestProducer(t) // AddEstimatedOutputTokens: true
 
 	var warnings int
 	logger := funcr.New(func(_, args string) {
-		if strings.Contains(args, "no osl-bucket attribute is present") {
+		if strings.Contains(args, "no outlen-bucket attribute is present") {
 			warnings++
 		}
 	}, funcr.Options{Verbosity: logutil.DEFAULT})
 	ctx := log.IntoContext(context.Background(), logger)
 
 	res := makeSchedulingResult("warn-endpoint")
-	// makeTokenRequest sets no osl-bucket attribute, so each PreRequest hits the
+	// makeTokenRequest sets no outlen-bucket attribute, so each PreRequest hits the
 	// missing-attribute branch; the sync.Once must collapse them to one warning.
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w1", 4), res))
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w2", 4), res))
 	require.NoError(t, producer.PreRequest(ctx, makeTokenRequest("w3", 4), res))
 
-	require.Equal(t, 1, warnings, "missing-osl-bucket warning must fire exactly once")
+	require.Equal(t, 1, warnings, "missing-outlen-bucket warning must fire exactly once")
 }
