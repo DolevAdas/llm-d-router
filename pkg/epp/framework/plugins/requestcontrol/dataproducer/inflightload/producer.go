@@ -48,7 +48,6 @@ const (
 	InFlightLoadProducerType = inflightloadconstants.InFlightLoadProducerType
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
-
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
