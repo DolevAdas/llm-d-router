@@ -40,6 +40,7 @@ import (
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -48,12 +49,6 @@ const (
 	profilePrefill           = "prefill"
 	maxDebugDumpEndpoints    = 100
 
-	// Pod-role label and values -- canonical definitions in
-	// pkg/epp/framework/plugins/scheduling/filter/bylabel/roles.go.
-	podRoleLabel         = "llm-d.ai/role"
-	podRolePrefill       = "prefill"
-	podRoleEncodePrefill = "encode-prefill"
-	podRoleDecode        = "decode"
 )
 
 // Config controls optional behaviors of InFlightLoadProducer.
@@ -511,9 +506,9 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 
 	// In P/D disaggregation the load is role-specific:
-	//   prefill-only endpoint -> ISL (it processes the input, not the output)
-	//   decode-only endpoint  -> estimated output (it generates the output, ISL was handled by prefill)
-	//   monolithic / combined -> ISL + estimated output (existing behavior, no P/D split)
+	//   prefill-only endpoint -> input tokens only (it processes the prompt, not the output)
+	//   decode-only endpoint  -> estimated output tokens only (input was handled by the prefill worker)
+	//   monolithic / combined -> input + estimated output tokens (existing behavior, no P/D split)
 	// The split is derived from the pod-role label and only activates with known roles.
 	if endpointHasPrefillOnlyRole(endpoint) {
 		return adjustedInput
@@ -525,11 +520,11 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 		// which warns once when that happens with this option enabled).
 		outputTokens := p.tokenEstimator.EstimateOutputFromRequest(request)
 		if endpointHasDecodeOnlyRole(endpoint) {
-			// Decode-only endpoint: ISL was already accounted for by the prefill
-			// worker, so its in-flight load is the estimated output only.
+			// Decode-only endpoint: input tokens were already accounted for by the
+			// prefill worker, so its in-flight load is the estimated output only.
 			return outputTokens
 		}
-		// Monolithic or combined-role endpoint: include both ISL and estimated output.
+		// Monolithic or combined-role endpoint: include both input and estimated output tokens.
 		return adjustedInput + outputTokens
 	}
 	return adjustedInput
@@ -542,8 +537,8 @@ func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
 	if endpoint == nil || endpoint.GetMetadata() == nil {
 		return false
 	}
-	role := endpoint.GetMetadata().Labels[podRoleLabel]
-	return role == podRolePrefill || role == podRoleEncodePrefill
+	role := endpoint.GetMetadata().Labels[bylabel.RoleLabel]
+	return role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill
 }
 
 // endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
@@ -553,7 +548,7 @@ func endpointHasDecodeOnlyRole(endpoint fwksched.Endpoint) bool {
 	if endpoint == nil || endpoint.GetMetadata() == nil {
 		return false
 	}
-	return endpoint.GetMetadata().Labels[podRoleLabel] == podRoleDecode
+	return endpoint.GetMetadata().Labels[bylabel.RoleLabel] == bylabel.RoleDecode
 }
 
 // warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is

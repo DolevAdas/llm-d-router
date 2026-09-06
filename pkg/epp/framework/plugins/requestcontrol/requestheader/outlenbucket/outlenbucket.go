@@ -16,12 +16,12 @@ limitations under the License.
 
 // Package outlenbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-length bin for a request from request-time signals
-// (enable_thinking, thinking_budget, has_tools, max_output_tokens, plus the
-// PR-2 signals reasoning_effort, tool_choice, response_format and
-// continue_final_message) and publishes it as a request attribute. Downstream
-// consumers -- the in-flight token estimator today, and flow-control queue
-// ordering / KV-pressure gating in the future -- read it via
-// scheduling.ReadRequestAttribute to make output-length-aware decisions.
+// (enable_thinking, thinking_budget/reasoning_budget, has_tools, tool_choice,
+// response_format, continue_final_message, low_effort, max_output_tokens) and
+// publishes it as a request attribute. Downstream consumers -- the in-flight
+// token estimator today, and flow-control queue ordering / KV-pressure gating
+// in the future -- read it via scheduling.ReadRequestAttribute to make
+// output-length-aware decisions.
 package outlenbucket
 
 import (
@@ -85,11 +85,13 @@ func (b Bucket) String() string {
 }
 
 // EstimateOutlen predicts the output-length bin using request-time signals.
-// Precedence (first match wins): LONG pushers (enable_thinking, reasoning_effort=high,
-// thinking_budget>4000) are checked first; SHORT pushers (tool_choice, has_tools,
-// continue_final_message, response_format, max_output_tokens<500) follow; everything
-// else is UNKNOWN. A max_output_tokens cap below the LONG floor downgrades LONG last.
-// ISL is intentionally excluded -- it has no correlation with output length.
+// Precedence (first match wins): LONG pushers (enable_thinking,
+// DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
+// are checked first; SHORT pushers (tool_choice, has_tools,
+// continue_final_message, low_effort, response_format, max_output_tokens<500)
+// follow; everything else is UNKNOWN. A max_output_tokens cap below the LONG
+// floor downgrades LONG last. Input length is intentionally excluded -- it has
+// no correlation with output length.
 func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	if body == nil {
 		return Unknown
@@ -99,32 +101,45 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	var thinkingBudget *int64
 	hasTools := false
 	continueFinalMessage := false
-	// has_tools, continue_final_message, enable_thinking and thinking_budget are
-	// only carried on the chat-completions shape (vLLM populates the thinking
-	// signals from the client's chat_template_kwargs / extra_body); the Claude
-	// messages and OpenAI responses shapes do not surface these signals.
+	lowEffort := false
+	// has_tools, continue_final_message, enable_thinking, thinking_budget, and the
+	// model-specific Nemotron/DeepSeek signals are only carried on the chat-completions
+	// shape (vLLM populates them from the client's chat_template_kwargs / extra_body).
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
 		continueFinalMessage = body.ChatCompletions.ContinueFinalMessage
 		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
 		enableThinking = boolPtrFromAny(kwArgs["enable_thinking"])
+		// DeepSeek V4 activation: extra_body={"thinking":{"type":"enabled"|"disabled"}}.
+		if enableThinking == nil {
+			if m, ok := kwArgs["thinking"].(map[string]any); ok {
+				switch stringFromAny(m["type"]) {
+				case "enabled":
+					t := true
+					enableThinking = &t
+				case "disabled":
+					f := false
+					enableThinking = &f
+				}
+			}
+		}
+		// Nemotron low_effort mode: suppresses extended thinking, expect short output.
+		if p := boolPtrFromAny(kwArgs["low_effort"]); p != nil {
+			lowEffort = *p
+		}
 		thinkingBudget = int64PtrFromAny(kwArgs["thinking_budget"])
+		if thinkingBudget == nil {
+			// Nemotron uses reasoning_budget as the budget key.
+			thinkingBudget = int64PtrFromAny(kwArgs["reasoning_budget"])
+		}
 	}
 
 	// PR-2 signals are OpenAI top-level body fields, not typed on the request —
-	// read them from the raw payload map (with a chat_template_kwargs fallback
-	// for reasoning_effort, which some vLLM chat templates relocate there).
-	var reasoningEffort, toolChoice, responseFormat string
+	// read them from the raw payload map.
+	var toolChoice, responseFormat string
 	if payload, ok := payloadMap(body); ok {
-		reasoningEffort = stringSignal(payload, "reasoning_effort")
 		toolChoice = toolChoiceKind(payload["tool_choice"])
 		responseFormat = responseFormatType(payload["response_format"])
-	}
-	if body.ChatCompletions != nil {
-		kwArgs := body.ChatCompletions.ChatTemplateKWArgs
-		if reasoningEffort == "" {
-			reasoningEffort = stringSignal(kwArgs, "reasoning_effort")
-		}
 	}
 
 	bucket := classifyOutlen(classifyInput{
@@ -132,7 +147,7 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		thinkingBudget:       thinkingBudget,
 		hasTools:             hasTools,
 		continueFinalMessage: continueFinalMessage,
-		reasoningEffort:      reasoningEffort,
+		lowEffort:            lowEffort,
 		toolChoice:           toolChoice,
 		responseFormat:       responseFormat,
 		maxOutputTokens:      body.MaxOutputTokens,
@@ -149,7 +164,7 @@ type classifyInput struct {
 	thinkingBudget       *int64
 	hasTools             bool
 	continueFinalMessage bool
-	reasoningEffort      string
+	lowEffort            bool
 	toolChoice           string
 	responseFormat       string
 	maxOutputTokens      *int64
@@ -165,13 +180,9 @@ func classifyOutlen(in classifyInput) Bucket {
 	if thinking {
 		return Long
 	}
-	// High reasoning effort -> long reasoning trace. [VALIDATED: gpt-oss-120b llm-jp splits]
-	if in.reasoningEffort == "high" {
-		return Long
-	}
-	// Large thinking budget, only when enable_thinking is not explicitly set ->
-	// treat as LONG. An explicit enable_thinking=false is the stronger signal and
-	// is respected: the request falls through rather than being forced to LONG.
+	// Large thinking/reasoning budget, only when enable_thinking is not explicitly
+	// set -> treat as LONG. An explicit enable_thinking=false is the stronger signal
+	// and is respected: the request falls through rather than being forced to LONG.
 	if in.enableThinking == nil && in.thinkingBudget != nil && *in.thinkingBudget > longBudgetThresholdTokens {
 		return Long
 	}
@@ -192,6 +203,10 @@ func classifyOutlen(in classifyInput) Bucket {
 	// Continuing/completing a partially-written assistant turn -> short by construction.
 	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=50]
 	if in.continueFinalMessage {
+		return Short
+	}
+	// Nemotron low_effort flag suppresses extended thinking → shorter output.
+	if in.lowEffort {
 		return Short
 	}
 	// Structured output (JSON) -> bounded, tends short.

@@ -41,8 +41,8 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 }
 
 // bodyOpts configures bodyWith for the PR-2 signal tests. The raw-payload
-// fields (reasoning_effort, tool_choice, response_format) live in
-// payload; continueFinal and tools/kwArgs live on the typed ChatCompletions.
+// fields (tool_choice, response_format) live in payload; continueFinal and
+// tools/kwArgs live on the typed ChatCompletions.
 type bodyOpts struct {
 	tools         []any
 	kwArgs        map[string]any
@@ -243,9 +243,10 @@ func TestInt64PtrFromAny(t *testing.T) {
 var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
 
 // TestEstimateOutlen_PR2Signals covers the PR-2 signals read from the raw
-// payload map (reasoning_effort, tool_choice, response_format), the
-// typed continue_final_message, the tool_choice="none" veto, and the
-// max_output_tokens bin ceiling -- plus their precedence against each other.
+// payload map (tool_choice, response_format), the typed continue_final_message,
+// vendor-specific normalizations (DeepSeek thinking.type, Nemotron low_effort /
+// reasoning_budget), the tool_choice="none" veto, and the max_output_tokens bin
+// ceiling.
 func TestEstimateOutlen_PR2Signals(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
@@ -254,21 +255,27 @@ func TestEstimateOutlen_PR2Signals(t *testing.T) {
 		body *fwkrh.InferenceRequestBody
 		want Bucket
 	}{
-		// --- LONG pushers ---
+		// --- LONG pushers: DeepSeek thinking.type vendor normalization ---
 		{
-			name: "reasoning_effort=high -> LONG",
-			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}}),
+			name: "thinking.type=enabled -> LONG (normalizes to enable_thinking=true)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": map[string]any{"type": "enabled"}}}),
 			want: Long,
 		},
 		{
-			name: "reasoning_effort=medium -> UNKNOWN (only high is a signal)",
-			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "medium"}}),
+			name: "thinking.type=disabled -> UNKNOWN (normalizes to enable_thinking=false)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking": map[string]any{"type": "disabled"}}}),
 			want: Unknown,
 		},
+		// --- LONG pushers: Nemotron reasoning_budget alias ---
 		{
-			name: "reasoning_effort via chat_template_kwargs fallback -> LONG",
-			body: bodyWith(bodyOpts{kwArgs: map[string]any{"reasoning_effort": "high"}}),
+			name: "reasoning_budget=5000 -> LONG (Nemotron alias for thinking_budget)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"reasoning_budget": int64(5000)}}),
 			want: Long,
+		},
+		{
+			name: "thinking_budget=100 + reasoning_budget=5000 -> UNKNOWN (thinking_budget wins; 100 < 4000)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"thinking_budget": int64(100), "reasoning_budget": int64(5000)}}),
+			want: Unknown,
 		},
 		// --- SHORT pushers ---
 		{
@@ -285,6 +292,16 @@ func TestEstimateOutlen_PR2Signals(t *testing.T) {
 			name: "continue_final_message=true -> SHORT",
 			body: bodyWith(bodyOpts{continueFinal: true}),
 			want: Short,
+		},
+		{
+			name: "low_effort=true -> SHORT (Nemotron suppressed thinking)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"low_effort": true}}),
+			want: Short,
+		},
+		{
+			name: "low_effort=true + enable_thinking=true -> LONG (thinking wins over low_effort)",
+			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true, "low_effort": true}}),
+			want: Long,
 		},
 		{
 			name: "response_format json_object -> SHORT",
@@ -334,29 +351,8 @@ func TestEstimateOutlen_PR2Signals(t *testing.T) {
 			want: Long,
 		},
 		{
-			name: "reasoning_effort=high + max_output=1500 -> UNKNOWN (ceiling applies to any LONG)",
-			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}, maxOut: ptr.To(int64(1500))}),
-			want: Unknown,
-		},
-		{
 			name: "enable_thinking=true + max_output=0 -> LONG (zero cap ignored)",
 			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true}, maxOut: ptr.To(int64(0))}),
-			want: Long,
-		},
-		// --- precedence: LONG pushers beat SHORT pushers ---
-		{
-			name: "reasoning_effort=high + tool_choice=required -> LONG (LONG wins)",
-			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high", "tool_choice": "required"}}),
-			want: Long,
-		},
-		{
-			name: "reasoning_effort=high + continue_final_message=true -> LONG (LONG wins)",
-			body: bodyWith(bodyOpts{payload: map[string]any{"reasoning_effort": "high"}, continueFinal: true}),
-			want: Long,
-		},
-		{
-			name: "enable_thinking=false + reasoning_effort=high -> LONG (false doesn't block effort)",
-			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": false}, payload: map[string]any{"reasoning_effort": "high"}}),
 			want: Long,
 		},
 	}
@@ -407,3 +403,4 @@ func TestResponseFormatType(t *testing.T) {
 	require.Equal(t, "", responseFormatType("json_object"))
 	require.Equal(t, "", responseFormatType(nil))
 }
+

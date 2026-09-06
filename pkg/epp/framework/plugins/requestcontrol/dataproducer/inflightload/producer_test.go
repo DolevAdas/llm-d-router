@@ -43,6 +43,7 @@ import (
 	attrprefix "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/datalayer/attribute/prefix"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	testutils "github.com/llm-d/llm-d-router/test/utils"
 )
 
@@ -1307,15 +1308,15 @@ func TestInFlightLoadProducerFactory_MaxEstimatedOutputTokens(t *testing.T) {
 // pod-role label (values: "prefill", "decode", "encode-prefill", etc.).
 func newStubSchedulingEndpointWithRole(name, role string) *stubSchedulingEndpoint {
 	ep := newStubSchedulingEndpoint(name)
-	ep.metadata.Labels = map[string]string{podRoleLabel: role}
+	ep.metadata.Labels = map[string]string{bylabel.RoleLabel: role}
 	return ep
 }
 
 // TestInFlightLoadProducer_PDRoleAwareLoad verifies that estimateRequestTokens
 // applies a role-based load split in P/D deployments:
-//   - prefill-only endpoint: ISL only   (output is the decode pod's cost)
-//   - decode-only endpoint:  estimated output only (ISL was handled by the prefill pod)
-//   - no-role / combined:    ISL + estimated output  (existing monolithic behavior)
+//   - prefill-only endpoint: input tokens only   (output is the decode pod's cost)
+//   - decode-only endpoint:  estimated output tokens only (input was handled by the prefill pod)
+//   - no-role / combined:    input + estimated output tokens  (existing monolithic behavior)
 func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 	t.Parallel()
 
@@ -1326,40 +1327,40 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 
 	makeReq := func() *fwksched.InferenceRequest { return makeTokenRequest("r", inputTok) }
 
-	t.Run("prefill-only role -> ISL only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+	t.Run("prefill-only role -> input tokens only (addEstimatedOutputTokens=true)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
-		ep := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
+		ep := newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)
 		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
 		require.Equal(t, int64(inputTok), got)
 	})
 
-	t.Run("encode-prefill role -> ISL only", func(t *testing.T) {
+	t.Run("encode-prefill role -> input tokens only", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
-		ep := newStubSchedulingEndpointWithRole("enc-prefill-pod", podRoleEncodePrefill)
+		ep := newStubSchedulingEndpointWithRole("enc-prefill-pod", bylabel.RoleEncodePrefill)
 		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
 		require.Equal(t, int64(inputTok), got)
 	})
 
-	t.Run("decode-only role -> estimated output only (addEstimatedOutputTokens=true)", func(t *testing.T) {
+	t.Run("decode-only role -> estimated output tokens only (addEstimatedOutputTokens=true)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
-		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		ep := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
 		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
 		require.Equal(t, int64(outputTok), got)
 	})
 
-	t.Run("decode-only role -> ISL only when addEstimatedOutputTokens=false", func(t *testing.T) {
+	t.Run("decode-only role -> input tokens only when addEstimatedOutputTokens=false", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		producer.addEstimatedOutputTokens = false
-		ep := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+		ep := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
 		got := producer.estimateRequestTokens(ep, makeReq(), inputTok)
-		require.Equal(t, int64(inputTok), got, "without output estimation there is no output-length signal; ISL is the only proxy")
+		require.Equal(t, int64(inputTok), got, "without output estimation there is no output-length signal; input tokens are the only proxy")
 	})
 
-	t.Run("no role label -> ISL + estimated output (monolithic)", func(t *testing.T) {
+	t.Run("no role label -> input + estimated output tokens (monolithic)", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpoint("mono-pod") // no role label
@@ -1387,8 +1388,8 @@ func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 
 	// 4 input tokens; no outlen-bucket signal -> UNKNOWN estimate = 1000.
 	req := makeTokenRequest("req-pd-role", 4)
-	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", podRolePrefill)
-	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", podRoleDecode)
+	prefillEP := newStubSchedulingEndpointWithRole("prefill-pod", bylabel.RolePrefill)
+	decodeEP := newStubSchedulingEndpointWithRole("decode-pod", bylabel.RoleDecode)
 
 	res := &fwksched.SchedulingResult{
 		PrimaryProfileName: "decode",
