@@ -83,7 +83,7 @@ llm_d_epp_inflight_tokens{endpoint_name="ep1",fairness_id="",namespace="default"
 	// Admission: 4 input + UnknownOutputTokens estimated output = 4+UnknownOutputTokens tokens, 1 request.
 	// The request carries no outlen-bucket attribute, so EstimateOutputFromRequest
 	// falls back to UnknownOutputTokens. ep1 has no decode-only role label, so
-	// both ISL and estimated output are counted.
+	// both input tokens and estimated output are counted.
 	req := makeTokenRequest("req-gauge-lifecycle", 4)
 	res := makeSchedulingResult("ep1")
 	err := producer.PreRequest(ctx, req, res)

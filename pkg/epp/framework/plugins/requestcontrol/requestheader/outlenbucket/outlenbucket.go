@@ -17,7 +17,7 @@ limitations under the License.
 // Package outlenbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-length bin for a request from request-time signals
 // (enable_thinking, thinking_budget/reasoning_budget, has_tools, tool_choice,
-// response_format, continue_final_message, low_effort, max_output_tokens) and
+// response_format, continue_final_message, max_output_tokens) and
 // publishes it as a request attribute. Downstream consumers -- the in-flight
 // token estimator today, and flow-control queue ordering / KV-pressure gating
 // in the future -- read it via scheduling.ReadRequestAttribute to make
@@ -88,7 +88,7 @@ func (b Bucket) String() string {
 // Precedence (first match wins): LONG pushers (enable_thinking,
 // DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
 // are checked first; SHORT pushers (tool_choice, has_tools,
-// continue_final_message, low_effort, response_format, max_output_tokens<500)
+// continue_final_message, response_format, max_output_tokens<500)
 // follow; everything else is UNKNOWN. A max_output_tokens cap below the LONG
 // floor downgrades LONG last. Input length is intentionally excluded -- it has
 // no correlation with output length.
@@ -101,9 +101,8 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 	var thinkingBudget *int64
 	hasTools := false
 	continueFinalMessage := false
-	lowEffort := false
 	// has_tools, continue_final_message, enable_thinking, thinking_budget, and the
-	// model-specific Nemotron/DeepSeek signals are only carried on the chat-completions
+	// vendor-specific DeepSeek/Nemotron signals are only carried on the chat-completions
 	// shape (vLLM populates them from the client's chat_template_kwargs / extra_body).
 	if body.ChatCompletions != nil {
 		hasTools = len(body.ChatCompletions.Tools) > 0
@@ -122,10 +121,6 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 					enableThinking = &f
 				}
 			}
-		}
-		// Nemotron low_effort mode: suppresses extended thinking, expect short output.
-		if p := boolPtrFromAny(kwArgs["low_effort"]); p != nil {
-			lowEffort = *p
 		}
 		thinkingBudget = int64PtrFromAny(kwArgs["thinking_budget"])
 		if thinkingBudget == nil {
@@ -147,7 +142,6 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		thinkingBudget:       thinkingBudget,
 		hasTools:             hasTools,
 		continueFinalMessage: continueFinalMessage,
-		lowEffort:            lowEffort,
 		toolChoice:           toolChoice,
 		responseFormat:       responseFormat,
 		maxOutputTokens:      body.MaxOutputTokens,
@@ -164,7 +158,6 @@ type classifyInput struct {
 	thinkingBudget       *int64
 	hasTools             bool
 	continueFinalMessage bool
-	lowEffort            bool
 	toolChoice           string
 	responseFormat       string
 	maxOutputTokens      *int64
@@ -203,10 +196,6 @@ func classifyOutlen(in classifyInput) Bucket {
 	// Continuing/completing a partially-written assistant turn -> short by construction.
 	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=50]
 	if in.continueFinalMessage {
-		return Short
-	}
-	// Nemotron low_effort flag suppresses extended thinking → shorter output.
-	if in.lowEffort {
 		return Short
 	}
 	// Structured output (JSON) -> bounded, tends short.
@@ -270,8 +259,8 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 }
 
 // payloadMap returns the request's raw JSON payload as a map, if it was parsed
-// into one. PR-2 signals (reasoning_effort, tool_choice, response_format) are
-// not typed on the request body, so they are read here.
+// into one. PR-2 signals (tool_choice, response_format) are not typed on the
+// request body, so they are read here.
 func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
 	if body == nil || body.Payload == nil {
 		return nil, false

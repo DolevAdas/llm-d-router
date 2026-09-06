@@ -1368,7 +1368,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 		require.Equal(t, int64(inputTok+outputTok), got)
 	})
 
-	t.Run("combined role (prefill-decode) -> ISL + estimated output", func(t *testing.T) {
+	t.Run("combined role (prefill-decode) -> input tokens + estimated output", func(t *testing.T) {
 		t.Parallel()
 		producer := newTestProducer(t)
 		ep := newStubSchedulingEndpointWithRole("combined-pod", "prefill-decode")
@@ -1378,8 +1378,8 @@ func TestInFlightLoadProducer_PDRoleAwareLoad(t *testing.T) {
 }
 
 // TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest verifies the end-to-end
-// token-tracking path: a P/D request with role-labeled endpoints records ISL on
-// the prefill pod and the estimated output on the decode pod.
+// token-tracking path: a P/D request with role-labeled endpoints records input
+// tokens on the prefill pod and the estimated output on the decode pod.
 func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 	t.Parallel()
 
@@ -1405,7 +1405,7 @@ func TestInFlightLoadProducer_PDRoleAwareLoad_PreRequest(t *testing.T) {
 	decodeID := fullEndpointName("decode-pod")
 
 	require.Equal(t, int64(4), producer.tokenTracker.get(prefillID),
-		"prefill pod: ISL only (it processes the input)")
+		"prefill pod: input tokens only (it processes the prompt)")
 	require.Equal(t, int64(1000), producer.tokenTracker.get(decodeID),
 		"decode pod: estimated output only (it generates the output)")
 

@@ -244,9 +244,8 @@ var namedToolChoice = map[string]any{"type": "function", "function": map[string]
 
 // TestEstimateOutlen_PR2Signals covers the PR-2 signals read from the raw
 // payload map (tool_choice, response_format), the typed continue_final_message,
-// vendor-specific normalizations (DeepSeek thinking.type, Nemotron low_effort /
-// reasoning_budget), the tool_choice="none" veto, and the max_output_tokens bin
-// ceiling.
+// vendor-specific normalizations (DeepSeek thinking.type, Nemotron reasoning_budget),
+// the tool_choice="none" veto, and the max_output_tokens bin ceiling.
 func TestEstimateOutlen_PR2Signals(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
@@ -292,16 +291,6 @@ func TestEstimateOutlen_PR2Signals(t *testing.T) {
 			name: "continue_final_message=true -> SHORT",
 			body: bodyWith(bodyOpts{continueFinal: true}),
 			want: Short,
-		},
-		{
-			name: "low_effort=true -> SHORT (Nemotron suppressed thinking)",
-			body: bodyWith(bodyOpts{kwArgs: map[string]any{"low_effort": true}}),
-			want: Short,
-		},
-		{
-			name: "low_effort=true + enable_thinking=true -> LONG (thinking wins over low_effort)",
-			body: bodyWith(bodyOpts{kwArgs: map[string]any{"enable_thinking": true, "low_effort": true}}),
-			want: Long,
 		},
 		{
 			name: "response_format json_object -> SHORT",
