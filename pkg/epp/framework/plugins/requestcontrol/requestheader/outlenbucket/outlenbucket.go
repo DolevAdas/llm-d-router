@@ -129,8 +129,8 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		}
 	}
 
-	// PR-2 signals are OpenAI top-level body fields, not typed on the request —
-	// read them from the raw payload map.
+	// tool_choice and response_format are OpenAI top-level body fields, not typed
+	// on the request — read them from the raw payload map.
 	var toolChoice, responseFormat string
 	if payload, ok := payloadMap(body); ok {
 		toolChoice = toolChoiceKind(payload["tool_choice"])
@@ -259,8 +259,8 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 }
 
 // payloadMap returns the request's raw JSON payload as a map, if it was parsed
-// into one. PR-2 signals (tool_choice, response_format) are not typed on the
-// request body, so they are read here.
+// into one. tool_choice and response_format are not typed on the request body,
+// so they are read here.
 func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
 	if body == nil || body.Payload == nil {
 		return nil, false

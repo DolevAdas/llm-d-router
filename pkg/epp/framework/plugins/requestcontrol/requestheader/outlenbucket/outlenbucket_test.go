@@ -40,7 +40,7 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 	}
 }
 
-// bodyOpts configures bodyWith for the PR-2 signal tests. The raw-payload
+// bodyOpts configures bodyWith for the extended signal tests. The raw-payload
 // fields (tool_choice, response_format) live in payload; continueFinal and
 // tools/kwArgs live on the typed ChatCompletions.
 type bodyOpts struct {
@@ -52,7 +52,7 @@ type bodyOpts struct {
 }
 
 // bodyWith builds a request body exercising both the typed chat-completions
-// fields and the raw JSON payload map that PR-2 signals are read from.
+// fields and the raw JSON payload map that tool_choice/response_format are read from.
 func bodyWith(o bodyOpts) *fwkrh.InferenceRequestBody {
 	b := &fwkrh.InferenceRequestBody{
 		ChatCompletions: &fwkrh.ChatCompletionsRequest{
@@ -242,11 +242,11 @@ func TestInt64PtrFromAny(t *testing.T) {
 // namedToolChoice is an OpenAI tool_choice object forcing a specific function.
 var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
 
-// TestEstimateOutlen_PR2Signals covers the PR-2 signals read from the raw
-// payload map (tool_choice, response_format), the typed continue_final_message,
+// TestEstimateOutlen_ExtendedSignals covers signals read from the raw payload
+// map (tool_choice, response_format), the typed continue_final_message,
 // vendor-specific normalizations (DeepSeek thinking.type, Nemotron reasoning_budget),
 // the tool_choice="none" veto, and the max_output_tokens bin ceiling.
-func TestEstimateOutlen_PR2Signals(t *testing.T) {
+func TestEstimateOutlen_ExtendedSignals(t *testing.T) {
 	oneTool := []any{map[string]any{"type": "function"}}
 
 	tests := []struct {
