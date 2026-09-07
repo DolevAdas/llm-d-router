@@ -29,7 +29,7 @@ for any subsystem, exactly like `agent-identity`.
 
 Classification (first match wins):
 
-1. `enable_thinking=true` or `reasoning_effort=high` → **LONG**.
+1. `enable_thinking=true` → **LONG**.
 2. `thinking_budget > 4000` (without explicit `enable_thinking`) → **LONG**.
 3. `tool_choice` is `required` or a named function → **SHORT**.
 4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice ≠ none` → **SHORT**.
@@ -39,11 +39,11 @@ Classification (first match wins):
 8. Otherwise → **UNKNOWN**.
 
 The `enable_thinking`, `thinking_budget`, and tools signals are read from the
-chat-completions body (`chat_template_kwargs` and `tools`); `reasoning_effort`,
-`tool_choice`, and `response_format` are read from the raw request payload. Other
-body shapes (Claude `/v1/messages`, OpenAI `/v1/responses`) are not inspected for
-these: their thinking signals are not surfaced, so a tool-call there could not be
-told apart from a reasoning request and is left UNKNOWN. `max_output_tokens` is the
+chat-completions body (`chat_template_kwargs` and `tools`); `tool_choice` and
+`response_format` are read from the raw request payload. Other body shapes
+(Claude `/v1/messages`, OpenAI `/v1/responses`) are not inspected for these:
+their thinking signals are not surfaced, so a tool-call there could not be told
+apart from a reasoning request and is left UNKNOWN. `max_output_tokens` is the
 normalized client cap and applies regardless of shape.
 
 `UNKNOWN` is still published (as the zero value), so a missing attribute and an
@@ -54,8 +54,12 @@ concurrent use.
 
 - `request.Body.ChatCompletions.ChatTemplateKWArgs` -- `enable_thinking`,
   `thinking_budget` (populated by vLLM from the client's `extra_body`).
+  Vendor aliases: `reasoning_budget` (Nemotron), `thinking.type` (DeepSeek V4).
   Chat-completions only.
 - `request.Body.ChatCompletions.Tools` -- presence implies `has_tools`.
+- `request.Body.ChatCompletions.ContinueFinalMessage` -- `continue_final_message`.
+- `request.Body.Payload["tool_choice"]` -- string or named-function object.
+- `request.Body.Payload["response_format"]` -- `{"type": "json_object"|"json_schema"}`.
 - `request.Body.MaxOutputTokens` -- normalized client output cap.
 
 Input length is intentionally *not* consumed -- it has no correlation with
@@ -120,4 +124,5 @@ case; see `warnMissingOutlenBucket`.)
   but a long request is never labeled SHORT.
 - **Signals must be present on the wire.** `enable_thinking` / `thinking_budget`
   only appear when the client sends them (via `extra_body`) and the server model
-  supports them (e.g. GLM 5.2, Kimi K3).
+  supports them (e.g. GLM 5.2, Kimi K3, Nemotron via `reasoning_budget`, DeepSeek
+  via `thinking.type`).

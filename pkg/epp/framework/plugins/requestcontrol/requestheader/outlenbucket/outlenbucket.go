@@ -268,12 +268,6 @@ func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
 	return body.Payload.AsMap()
 }
 
-// stringSignal returns m[key] as a string when it is a JSON string, else "".
-// It never panics on a nil map (a nil map read yields the zero value).
-func stringSignal(m map[string]any, key string) string {
-	return stringFromAny(m[key])
-}
-
 // stringFromAny returns v as a string when it is one, else "" ("not set").
 func stringFromAny(v any) string {
 	if s, ok := v.(string); ok {

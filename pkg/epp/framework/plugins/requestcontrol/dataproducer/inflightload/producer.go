@@ -504,7 +504,9 @@ func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint,
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
 	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		// Output tokens are based on the full input, not the cached portion.
+		// Add the estimated output tokens from the output-length bucket the outlen-bucket plugin
+		// published; an absent bucket is estimated as UNKNOWN (see PreRequest, which
+		// warns once when that happens with this option enabled).
 		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
 	return tokens
