@@ -182,7 +182,7 @@ func classifyOutlen(in classifyInput) Bucket {
 
 	// --- SHORT pushers (must be high-precision) ---
 
-	// Forced tool call -> short tool-call JSON. [VALIDATED: logically guaranteed + xLAM proxy n=56,932]
+	// Forced tool call -> short tool-call JSON.
 	if in.toolChoice == "required" || in.toolChoice == "named" {
 		return Short
 	}
@@ -194,12 +194,10 @@ func classifyOutlen(in classifyInput) Bucket {
 		return Short
 	}
 	// Continuing/completing a partially-written assistant turn -> short by construction.
-	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=50]
 	if in.continueFinalMessage {
 		return Short
 	}
 	// Structured output (JSON) -> bounded, tends short.
-	// [VALIDATED: kermit sweep Gemma 4 31B IT, 100% SHORT n=100 json_object / n=37 json_schema]
 	if in.responseFormat == "json_object" || in.responseFormat == "json_schema" {
 		return Short
 	}
