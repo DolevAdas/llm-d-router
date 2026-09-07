@@ -40,7 +40,6 @@ import (
 	inflightloadconstants "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/constants"
 	tokenproducer "github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/tokenizer"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
-	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/scheduling/filter/bylabel"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -503,51 +502,12 @@ func (p *InFlightLoadProducer) PreRequest(ctx context.Context, request *fwksched
 
 func (p *InFlightLoadProducer) estimateRequestTokens(endpoint fwksched.Endpoint, request *fwksched.InferenceRequest, inputTokens int64) int64 {
 	adjustedInput := uncachedInputTokens(endpoint, inputTokens, p.prefixMatchInfoDK)
-
-	// In P/D disaggregation the load is role-specific:
-	//   prefill-only endpoint -> input tokens only (it processes the prompt, not the output)
-	//   decode-only endpoint  -> estimated output tokens only (input was handled by the prefill worker)
-	//   monolithic / combined -> input + estimated output tokens (existing behavior, no P/D split)
-	// The split is derived from the pod-role label and only activates with known roles.
-	if endpointHasPrefillOnlyRole(endpoint) {
-		return adjustedInput
-	}
-
+	tokens := adjustedInput
 	if p.addEstimatedOutputTokens {
-		// Estimated output tokens come from the output-length bucket the outlen-bucket
-		// plugin published; an absent bucket is estimated as UNKNOWN (see PreRequest,
-		// which warns once when that happens with this option enabled).
-		outputTokens := p.tokenEstimator.EstimateOutputFromRequest(request)
-		if endpointHasDecodeOnlyRole(endpoint) {
-			// Decode-only endpoint: input tokens were already accounted for by the
-			// prefill worker, so its in-flight load is the estimated output only.
-			return outputTokens
-		}
-		// Monolithic or combined-role endpoint: include both input and estimated output tokens.
-		return adjustedInput + outputTokens
+		// Output tokens are based on the full input, not the cached portion.
+		tokens += p.tokenEstimator.EstimateOutputFromRequest(request)
 	}
-	return adjustedInput
-}
-
-// endpointHasPrefillOnlyRole reports whether the endpoint is labeled as a
-// prefill-only worker (including encode-prefill). Combined-role endpoints
-// (prefill-decode, both) return false -- they also do decode work.
-func endpointHasPrefillOnlyRole(endpoint fwksched.Endpoint) bool {
-	if endpoint == nil || endpoint.GetMetadata() == nil {
-		return false
-	}
-	role := endpoint.GetMetadata().Labels[bylabel.RoleLabel]
-	return role == bylabel.RolePrefill || role == bylabel.RoleEncodePrefill
-}
-
-// endpointHasDecodeOnlyRole reports whether the endpoint is labeled as a
-// decode-only worker. Combined-role endpoints (prefill-decode, both) return
-// false -- they also do prefill work.
-func endpointHasDecodeOnlyRole(endpoint fwksched.Endpoint) bool {
-	if endpoint == nil || endpoint.GetMetadata() == nil {
-		return false
-	}
-	return endpoint.GetMetadata().Labels[bylabel.RoleLabel] == bylabel.RoleDecode
+	return tokens
 }
 
 // warnMissingOutlenBucket logs a single warning when AddEstimatedOutputTokens is
