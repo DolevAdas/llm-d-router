@@ -28,11 +28,11 @@ import (
 	"strings"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/llm-d/llm-d-router/pkg/common/observability/logging"
+	"github.com/llm-d/llm-d-router/pkg/common/observability/semconv"
 	"github.com/llm-d/llm-d-router/pkg/common/observability/tracing"
 	reqcommon "github.com/llm-d/llm-d-router/pkg/common/request"
 )
@@ -51,8 +51,8 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 
-	var requestData map[string]any
-	if err := json.Unmarshal(body, &requestData); err != nil {
+	requestData, err := decodeRequestBody(body)
+	if err != nil {
 		if err := errorJSONInvalid(err, w); err != nil {
 			s.logger.Error(err, "failed to send error response to client")
 		}
@@ -79,7 +79,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 	}
 	s.addP2PPullToPrefill(prefillKVParams, kvCacheSource, prefillPodHostPort)
 	prefillData[requestFieldKVTransferParams] = prefillKVParams
-	reqcommon.PrimeSingleTokenRequest(prefillData, requestData)
+	reqcommon.PrimeSingleTokenRequest(prefillData)
 
 	prefillBody, err := json.Marshal(prefillData)
 	if err != nil {
@@ -89,7 +89,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("prefill request body", "body", string(prefillBody))
+		v.Info("prefill request body", logging.HTTPBodyKey, string(prefillBody))
 	}
 
 	// Decode leg: pull KV from the prefiller's OffloadingConnector P2P tier. Original body
@@ -114,7 +114,7 @@ func (s *Server) handleP2P(w http.ResponseWriter, r *http.Request, prefillPodHos
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decode request body", "body", string(decodeBody))
+		v.Info("decode request body", logging.HTTPBodyKey, string(decodeBody))
 	}
 
 	s.handleP2PSequentialRequests(w, r, prefillBody, decodeBody, prefillPodHostPort)
@@ -147,9 +147,9 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		trace.WithSpanKind(trace.SpanKindInternal),
 	)
 	prefillSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.prefill_target", prefillHost),
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.prefill.async", false),
+		semconv.LLMDPDProxyPrefillTarget(prefillHost),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyPrefillAsync(false),
 	)
 	prefillStart := time.Now()
 
@@ -159,8 +159,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	prefillFailed := isHTTPError(pw.statusCode)
 	prefillSpan.SetAttributes(
-		attribute.Int("llm_d.pd_proxy.prefill.status_code", pw.statusCode),
-		attribute.Float64("llm_d.pd_proxy.prefill.duration_ms", float64(prefillDuration.Milliseconds())),
+		semconv.LLMDPDProxyPrefillStatusCode(pw.statusCode),
+		semconv.LLMDPDProxyPrefillDurationMs(float64(prefillDuration.Milliseconds())),
 	)
 	if prefillFailed {
 		prefillSpan.SetStatus(codes.Error, "prefill request failed")
@@ -195,8 +195,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 	)
 	defer decodeSpan.End()
 	decodeSpan.SetAttributes(
-		attribute.String("llm_d.pd_proxy.connector", KVConnectorOffloading),
-		attribute.Bool("llm_d.pd_proxy.decode.concurrent_with_prefill", false),
+		semconv.LLMDPDProxyConnector(KVConnectorOffloading),
+		semconv.LLMDPDProxyDecodeConcurrentWithPrefill(false),
 	)
 	decodeStart := time.Now()
 
@@ -204,8 +204,8 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 
 	decodeDuration := time.Since(decodeStart)
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.decode.duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.String("llm_d.pd_proxy.decode.target", s.config.DecoderURL.Host),
+		semconv.LLMDPDProxyDecodeDurationMs(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyDecodeTarget(s.config.DecoderURL.Host),
 	)
 
 	// End-to-end P/D timing. True TTFT captures time from gateway request start
@@ -218,10 +218,10 @@ func (s *Server) handleP2PSequentialRequests(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	decodeSpan.SetAttributes(
-		attribute.Float64("llm_d.pd_proxy.total_duration_ms", float64(totalDuration.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.true_ttft_ms", float64(trueTTFT.Milliseconds())),
-		attribute.Float64("llm_d.pd_proxy.decode_duration_ms", float64(decodeDuration.Milliseconds())),
-		attribute.Bool("llm_d.pd_proxy.concurrent_pd", false),
+		semconv.LLMDPDProxyTotalDurationMs(float64(totalDuration.Milliseconds())),
+		semconv.LLMDPDProxyTrueTTFTMs(float64(trueTTFT.Milliseconds())),
+		semconv.LLMDPDProxyDecodeDurationMsSummary(float64(decodeDuration.Milliseconds())),
+		semconv.LLMDPDProxyConcurrentPD(false),
 	)
 }
 
@@ -367,7 +367,7 @@ func (s *Server) decodeWithP2PSource(w http.ResponseWriter, r *http.Request, sou
 		return
 	}
 	if v := s.logger.V(logging.TRACE); v.Enabled() {
-		v.Info("decoder request body with p2p source", "body", string(newBody))
+		v.Info("decoder request body with p2p source", logging.HTTPBodyKey, string(newBody))
 	}
 
 	s.dispatchDecode(w, cloneRequestWithBody(r.Context(), r, newBody), requestData)
