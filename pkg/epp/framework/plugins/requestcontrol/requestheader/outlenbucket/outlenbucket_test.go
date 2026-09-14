@@ -392,4 +392,3 @@ func TestResponseFormatType(t *testing.T) {
 	require.Equal(t, "", responseFormatType("json_object"))
 	require.Equal(t, "", responseFormatType(nil))
 }
-
