@@ -29,14 +29,15 @@ for any subsystem, exactly like `agent-identity`.
 
 Classification (first match wins):
 
-1. `enable_thinking=true` → **LONG**.
-2. `thinking_budget > 4000` (without explicit `enable_thinking`) → **LONG**.
-3. `tool_choice` is `required` or a named function → **SHORT**.
-4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice ≠ none` → **SHORT**.
-5. `continue_final_message=true` → **SHORT**.
-6. `response_format` is `json_object` or `json_schema` → **SHORT**.
-7. `max_output_tokens < 500` → **SHORT** (explicit client cap).
-8. Otherwise → **UNKNOWN**.
+1. `enable_thinking=true` -> **LONG**.
+2. `thinking_budget > 4000` (without explicit `enable_thinking`) -> **LONG**.
+3. `tool_choice` is `required` or a named function -> **SHORT**.
+4. `has_tools=true` and `enable_thinking` false/absent and `tool_choice != none` -> **SHORT**.
+5. `continue_final_message=true` -> **SHORT**.
+6. `response_format` is `json_object` or `json_schema` -> **SHORT**.
+7. `max_output_tokens < 500` -> **SHORT** (explicit client cap).
+8. Otherwise -> **UNKNOWN**.
+9. *(bin ceiling, applied last)* `max_output_tokens < 2000` downgrades a tentative **LONG** to **UNKNOWN** (a cap below the LONG floor makes a long generation physically impossible).
 
 The `enable_thinking`, `thinking_budget`, and tools signals are read from the
 chat-completions body (`chat_template_kwargs` and `tools`); `tool_choice` and
