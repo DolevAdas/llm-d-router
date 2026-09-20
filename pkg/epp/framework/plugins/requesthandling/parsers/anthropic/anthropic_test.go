@@ -19,6 +19,7 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -463,8 +464,33 @@ func TestAnthropicParser_ParseRequest(t *testing.T) {
 				return
 			}
 
+			path := strings.TrimRight(tt.headers[":path"], "/")
+			if strings.HasSuffix(path, "/render") {
+				if !got.SkipResponseProcessing {
+					t.Fatal("render response must pass through")
+				}
+				if !got.Body.RenderRequest || string(got.Body.RawBody) != string(bodyBytes) || got.Body.Model != tt.body["model"] {
+					t.Fatal("render request must preserve bytes and model routing metadata")
+				}
+				return
+			}
+
 			if got.SkipResponseProcessing != false {
 				t.Errorf("ParseRequest() got.SkipResponseProcessing = %v, want false", got.SkipResponseProcessing)
+			}
+
+			if tt.want.Messages != nil {
+				tt.want.RawBody = bodyBytes
+				payload, _ := tt.want.Payload.AsMap()
+				for key, value := range payload {
+					raw, err := json.Marshal(value)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if raw[0] == '{' || raw[0] == '[' || key == "system" {
+						payload[key] = json.RawMessage(raw)
+					}
+				}
 			}
 
 			// Model is extracted from the request body's "model" field.
@@ -684,7 +710,7 @@ func TestAnthropicParser_Claims(t *testing.T) {
 	parser := NewAnthropicParser()
 	got := parser.Claims()
 	want := fwkrh.Claims{
-		Paths:     []string{messagesAPI, countTokensAPI},
+		Paths:     []string{messagesAPI, countTokensAPI, messagesAPI + "/render"},
 		Protocols: []v1.AppProtocol{v1.AppProtocolH2C, v1.AppProtocolHTTP},
 	}
 

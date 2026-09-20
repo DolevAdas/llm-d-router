@@ -277,6 +277,15 @@ func toolChoiceKind(v any) string {
 	case map[string]any:
 		// A specific tool is forced -> a short tool-call JSON response.
 		return "named"
+	case json.RawMessage:
+		// UnmarshalEnvelope stores objects as json.RawMessage; object = named tool.
+		if len(t) > 0 && t[0] == '{' {
+			return "named"
+		}
+		var s string
+		if err := json.Unmarshal(t, &s); err == nil {
+			return s
+		}
 	}
 	return ""
 }

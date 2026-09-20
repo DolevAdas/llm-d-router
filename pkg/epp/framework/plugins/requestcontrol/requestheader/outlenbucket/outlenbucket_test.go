@@ -383,4 +383,3 @@ func TestToolChoiceKind(t *testing.T) {
 	require.Equal(t, "", toolChoiceKind(nil))
 	require.Equal(t, "", toolChoiceKind(42))
 }
-
