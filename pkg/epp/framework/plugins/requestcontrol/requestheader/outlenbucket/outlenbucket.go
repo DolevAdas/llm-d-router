@@ -45,6 +45,10 @@ const (
 	// PluginType is the plugin type name used in the EPP config.
 	PluginType = "outlen-bucket"
 
+	// toolChoiceNamed is the normalized value returned when tool_choice forces a specific
+	// function call ({"type":"function","function":{"name":...}}); used as a SHORT signal.
+	toolChoiceNamed = "named"
+
 	// longBudgetThresholdTokens is the thinking_budget above which a request is
 	// classified LONG even when enable_thinking is not explicitly set.
 	longBudgetThresholdTokens = 4000
@@ -180,7 +184,7 @@ func classifyOutlen(in classifyInput) Bucket {
 	// --- SHORT pushers (must be high-precision) ---
 
 	// Forced tool call -> short tool-call JSON.
-	if in.toolChoice == "required" || in.toolChoice == "named" {
+	if in.toolChoice == "required" || in.toolChoice == toolChoiceNamed {
 		return Short
 	}
 	// Tools without thinking -> short tool-call JSON (measured p50 = 41 tokens, 100% precision).
@@ -276,11 +280,11 @@ func toolChoiceKind(v any) string {
 		return t
 	case map[string]any:
 		// A specific tool is forced -> a short tool-call JSON response.
-		return "named"
+		return toolChoiceNamed
 	case json.RawMessage:
 		// UnmarshalEnvelope stores objects as json.RawMessage; object = named tool.
 		if len(t) > 0 && t[0] == '{' {
-			return "named"
+			return toolChoiceNamed
 		}
 		var s string
 		if err := json.Unmarshal(t, &s); err == nil {
