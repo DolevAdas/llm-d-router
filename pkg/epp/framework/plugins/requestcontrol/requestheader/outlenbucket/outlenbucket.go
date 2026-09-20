@@ -156,8 +156,8 @@ type classifyInput struct {
 	thinkingBudget       *int64
 	hasTools             bool
 	continueFinalMessage bool
-	toolChoice      string
-	maxOutputTokens *int64
+	toolChoice           string
+	maxOutputTokens      *int64
 }
 
 // classifyOutlen applies the precedence cascade documented on EstimateOutlen.
