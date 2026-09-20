@@ -1,3 +1,19 @@
+/*
+Copyright 2026 The llm-d Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package kvevents //nolint:testpackage // tests use unexported processEventBatch
 
 import (
@@ -1515,6 +1531,73 @@ func TestEffectiveReplayPort(t *testing.T) {
 				ReplaySocketPort: tt.replayPort,
 			}
 			assert.Equal(t, tt.want, cfg.EffectiveReplayPort())
+		})
+	}
+}
+
+func TestBlockStoredEvent_LoRAExtraKeysMatchRequestKeys(t *testing.T) {
+	adapter := "adapter-1"
+	mm := func(hashes ...string) *kvblock.BlockExtraFeatures {
+		f := &kvblock.BlockExtraFeatures{}
+		for _, h := range hashes {
+			f.MMHashes = append(f.MMHashes, kvblock.MMHash{Hash: h})
+		}
+		return f
+	}
+
+	for _, tt := range []struct {
+		name          string
+		loraName      *string
+		extraKeys     [][]any
+		requestModel  string
+		requestExtras []*kvblock.BlockExtraFeatures
+	}{
+		{
+			name:         "base model",
+			requestModel: "test-model",
+		},
+		{
+			name:         "adapter",
+			loraName:     &adapter,
+			extraKeys:    [][]any{{adapter}, {adapter}},
+			requestModel: adapter,
+		},
+		{
+			name:          "adapter with cache salt",
+			loraName:      &adapter,
+			extraKeys:     [][]any{{adapter, "salt-1"}, {adapter}},
+			requestModel:  adapter,
+			requestExtras: []*kvblock.BlockExtraFeatures{mm("salt-1"), nil},
+		},
+		{
+			name:          "adapter with an image",
+			loraName:      &adapter,
+			extraKeys:     [][]any{{adapter, "img-1"}, {adapter}},
+			requestModel:  adapter,
+			requestExtras: []*kvblock.BlockExtraFeatures{mm("img-1"), nil},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := logging.NewTestLoggerIntoContext(context.Background())
+			pool, idx, tp := newTestPool(t, 64)
+			tokens := makeTokens(128)
+
+			pool.processEventBatch(ctx, &EventBatch{Events: []GenericEvent{&BlockStoredEvent{
+				BlockHashes: makeEngineKeys(2, 500),
+				Tokens:      tokens,
+				LoraName:    tt.loraName,
+				ExtraKeys:   tt.extraKeys,
+			}}}, "pod-a", "test-model")
+
+			requestKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, tt.requestModel, tt.requestExtras)
+			require.NoError(t, err)
+			require.Len(t, requestKeys, 2)
+			result, err := idx.Lookup(ctx, requestKeys, nil)
+			require.NoError(t, err)
+			for _, key := range requestKeys {
+				require.Len(t, result[key], 1, "request key %d not indexed for pod-a", key)
+				assert.Equal(t, "pod-a", result[key][0].PodIdentifier)
+			}
 		})
 	}
 }

@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -1214,6 +1215,26 @@ func TestFlowControlPoolSaturationMetric(t *testing.T) {
 	val, err = testutil.GetGaugeMetricValue(llmdFlowControlPoolSaturation.WithLabelValues(pool, "decode"))
 	require.NoError(t, err)
 	require.Equal(t, 0.7, val)
+}
+
+func TestFlowControlDetectorSaturationMetric(t *testing.T) {
+	Reset()
+
+	RecordFlowControlDetectorSaturation("concurrency", "prefill", 0.4)
+	RecordFlowControlDetectorSaturation("concurrency", "decode", 0.9)
+	RecordFlowControlDetectorSaturation("queue", "decode", 0.1)
+
+	val, err := testutil.GetGaugeMetricValue(llmdFlowControlDetectorSaturation.WithLabelValues("concurrency", "prefill"))
+	require.NoError(t, err)
+	require.Equal(t, 0.4, val)
+
+	val, err = testutil.GetGaugeMetricValue(llmdFlowControlDetectorSaturation.WithLabelValues("concurrency", "decode"))
+	require.NoError(t, err)
+	require.Equal(t, 0.9, val)
+
+	DeleteFlowControlDetectorSaturationStage("decode")
+	require.Equal(t, 1, promtestutil.CollectAndCount(llmdFlowControlDetectorSaturation),
+		"only the prefill series should remain")
 }
 
 func TestFlowControlRequestsTotalMetric(t *testing.T) {

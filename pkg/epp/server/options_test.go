@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -300,6 +301,51 @@ func TestValidateRefreshMetricsIntervalFloor(t *testing.T) {
 	opts.RefreshMetricsInterval = 50 * time.Millisecond
 	if err := opts.Validate(); err != nil {
 		t.Errorf("Expected Validate() to pass for RefreshMetricsInterval of 50ms, got %v", err)
+	}
+}
+
+func TestValidateMetricsTimingFlags(t *testing.T) {
+	opts := NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshPrometheusMetricsInterval = 0
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for zero RefreshPrometheusMetricsInterval, but it succeeded")
+	} else if !strings.Contains(err.Error(), "refresh-prometheus-metrics-interval") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.RefreshPrometheusMetricsInterval = -time.Second
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative RefreshPrometheusMetricsInterval, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.MetricsStalenessThreshold = 0
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for zero MetricsStalenessThreshold, but it succeeded")
+	} else if !strings.Contains(err.Error(), "metrics-staleness-threshold") {
+		t.Errorf("Expected error to reference the flag, got: %v", err)
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	opts.MetricsStalenessThreshold = -5 * time.Second
+	if err := opts.Validate(); err == nil {
+		t.Errorf("Expected Validate() to fail for negative MetricsStalenessThreshold, but it succeeded")
+	}
+
+	opts = NewOptions()
+	opts.AddFlags(pflag.NewFlagSet("test", pflag.ContinueOnError))
+	opts.PoolName = testPoolName
+	if err := opts.Validate(); err != nil {
+		t.Errorf("Expected Validate() to pass for default timing values, got: %v", err)
 	}
 }
 

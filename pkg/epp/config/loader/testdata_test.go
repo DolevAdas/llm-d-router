@@ -1,5 +1,6 @@
 /*
 Copyright 2025 The Kubernetes Authors.
+Copyright 2026 The llm-d Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -107,6 +108,41 @@ plugins:
     dependency: test1
 - name: test1
   type: test-plugin
+`
+
+// maxSaturationDetectorSortsBeforeChildrenText represents a valid config with a composite
+// saturation detector whose name sorts before the names of the detectors it references
+const maxSaturationDetectorSortsBeforeChildrenText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: decode-concurrency
+  type: utilization-detector
+- name: prefill-queue
+  type: utilization-detector
+- name: admission-split
+  type: max-saturation-detector
+  parameters:
+    detectors: [decode-concurrency, prefill-queue]
+`
+
+// maxSaturationDetectorStageScopedText represents a valid config with a composite saturation
+// detector whose children are restricted to pipeline stages
+const maxSaturationDetectorStageScopedText = `
+apiVersion: llm-d.ai/v1alpha1
+kind: EndpointPickerConfig
+plugins:
+- name: decode-concurrency
+  type: utilization-detector
+- name: prefill-queue
+  type: utilization-detector
+- name: admission-split
+  type: max-saturation-detector
+  parameters:
+    detectors: [decode-concurrency, prefill-queue]
+    stages:
+      decode-concurrency: [decode]
+      prefill-queue: [prefill]
 `
 
 // pluginsRefedByPointerText represents a valid config with a plugin that is dependent
