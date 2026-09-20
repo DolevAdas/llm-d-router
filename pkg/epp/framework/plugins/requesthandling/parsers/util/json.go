@@ -48,9 +48,11 @@ func Unmarshal(data []byte, v any) error {
 func UnmarshalMapWithRawField(data []byte, rawField string) (map[string]any, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(data, &fields); err != nil {
-		if fallbackErr := Unmarshal(data, &fields); fallbackErr != nil {
+		var fallback map[string]json.RawMessage
+		if fallbackErr := Unmarshal(data, &fallback); fallbackErr != nil {
 			return nil, fallbackErr
 		}
+		return nil, err
 	}
 
 	result := make(map[string]any, len(fields))

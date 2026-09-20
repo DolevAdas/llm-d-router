@@ -17,7 +17,7 @@ limitations under the License.
 // Package outlenbucket provides a RequestHeaderProcessor plugin that predicts the
 // output-length bin for a request from request-time signals
 // (enable_thinking, thinking_budget/reasoning_budget, has_tools, tool_choice,
-// response_format, continue_final_message, max_output_tokens) and
+// continue_final_message, max_output_tokens) and
 // publishes it as a request attribute. Downstream consumers -- the in-flight
 // token estimator today, and flow-control queue ordering / KV-pressure gating
 // in the future -- read it via scheduling.ReadRequestAttribute to make
@@ -88,7 +88,7 @@ func (b Bucket) String() string {
 // Precedence (first match wins): LONG pushers (enable_thinking,
 // DeepSeek thinking.type="enabled", thinking_budget/reasoning_budget>4000)
 // are checked first; SHORT pushers (tool_choice, has_tools,
-// continue_final_message, response_format, max_output_tokens<500)
+// continue_final_message, max_output_tokens<500)
 // follow; everything else is UNKNOWN. A max_output_tokens cap below the LONG
 // floor downgrades LONG last. Input length is intentionally excluded -- it has
 // no correlation with output length.
@@ -129,12 +129,11 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		}
 	}
 
-	// tool_choice and response_format are OpenAI top-level body fields, not typed
-	// on the request — read them from the raw payload map.
-	var toolChoice, responseFormat string
+	// tool_choice is an OpenAI top-level body field, not typed on the request —
+	// read it from the raw payload map.
+	var toolChoice string
 	if payload, ok := payloadMap(body); ok {
 		toolChoice = toolChoiceKind(payload["tool_choice"])
-		responseFormat = responseFormatType(payload["response_format"])
 	}
 
 	bucket := classifyOutlen(classifyInput{
@@ -143,7 +142,6 @@ func EstimateOutlen(body *fwkrh.InferenceRequestBody) Bucket {
 		hasTools:             hasTools,
 		continueFinalMessage: continueFinalMessage,
 		toolChoice:           toolChoice,
-		responseFormat:       responseFormat,
 		maxOutputTokens:      body.MaxOutputTokens,
 	})
 
@@ -158,9 +156,8 @@ type classifyInput struct {
 	thinkingBudget       *int64
 	hasTools             bool
 	continueFinalMessage bool
-	toolChoice           string
-	responseFormat       string
-	maxOutputTokens      *int64
+	toolChoice      string
+	maxOutputTokens *int64
 }
 
 // classifyOutlen applies the precedence cascade documented on EstimateOutlen.
@@ -195,10 +192,6 @@ func classifyOutlen(in classifyInput) Bucket {
 	}
 	// Continuing/completing a partially-written assistant turn -> short by construction.
 	if in.continueFinalMessage {
-		return Short
-	}
-	// Structured output (JSON) -> bounded, tends short.
-	if in.responseFormat == "json_object" || in.responseFormat == "json_schema" {
 		return Short
 	}
 	// Explicit short cap set by the client -> treat as short.
@@ -257,8 +250,7 @@ func (p *Plugin) RequestHeader(_ context.Context, request *scheduling.InferenceR
 }
 
 // payloadMap returns the request's raw JSON payload as a map, if it was parsed
-// into one. tool_choice and response_format are not typed on the request body,
-// so they are read here.
+// into one. tool_choice is not typed on the request body, so it is read here.
 func payloadMap(body *fwkrh.InferenceRequestBody) (fwkrh.PayloadMap, bool) {
 	if body == nil || body.Payload == nil {
 		return nil, false
@@ -285,15 +277,6 @@ func toolChoiceKind(v any) string {
 	case map[string]any:
 		// A specific tool is forced -> a short tool-call JSON response.
 		return "named"
-	}
-	return ""
-}
-
-// responseFormatType returns the response_format.type ("text" | "json_object" |
-// "json_schema") from the OpenAI response_format object, or "" if absent.
-func responseFormatType(v any) string {
-	if m, ok := v.(map[string]any); ok {
-		return stringFromAny(m["type"])
 	}
 	return ""
 }

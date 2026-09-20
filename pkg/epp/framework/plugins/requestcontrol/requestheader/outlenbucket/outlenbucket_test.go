@@ -41,7 +41,7 @@ func chatBody(tools []any, kwArgs map[string]any, maxOut *int64) *fwkrh.Inferenc
 }
 
 // bodyOpts configures bodyWith for the extended signal tests. The raw-payload
-// fields (tool_choice, response_format) live in payload; continueFinal and
+// field (tool_choice) lives in payload; continueFinal and
 // tools/kwArgs live on the typed ChatCompletions.
 type bodyOpts struct {
 	tools         []any
@@ -52,7 +52,7 @@ type bodyOpts struct {
 }
 
 // bodyWith builds a request body exercising both the typed chat-completions
-// fields and the raw JSON payload map that tool_choice/response_format are read from.
+// fields and the raw JSON payload map that tool_choice is read from.
 func bodyWith(o bodyOpts) *fwkrh.InferenceRequestBody {
 	b := &fwkrh.InferenceRequestBody{
 		ChatCompletions: &fwkrh.ChatCompletionsRequest{
@@ -243,7 +243,7 @@ func TestInt64PtrFromAny(t *testing.T) {
 var namedToolChoice = map[string]any{"type": "function", "function": map[string]any{"name": "get_weather"}}
 
 // TestEstimateOutlen_ExtendedSignals covers signals read from the raw payload
-// map (tool_choice, response_format), the typed continue_final_message,
+// map (tool_choice), the typed continue_final_message,
 // vendor-specific normalizations (DeepSeek thinking.type, Nemotron reasoning_budget),
 // the tool_choice="none" veto, and the max_output_tokens bin ceiling.
 func TestEstimateOutlen_ExtendedSignals(t *testing.T) {
@@ -293,14 +293,14 @@ func TestEstimateOutlen_ExtendedSignals(t *testing.T) {
 			want: Short,
 		},
 		{
-			name: "response_format json_object -> SHORT",
+			name: "response_format json_object -> UNKNOWN (not a SHORT signal)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_object"}}}),
-			want: Short,
+			want: Unknown,
 		},
 		{
-			name: "response_format json_schema -> SHORT",
+			name: "response_format json_schema -> UNKNOWN (not a SHORT signal)",
 			body: bodyWith(bodyOpts{payload: map[string]any{"response_format": map[string]any{"type": "json_schema"}}}),
-			want: Short,
+			want: Unknown,
 		},
 		{
 			name: "response_format text -> UNKNOWN (not a SHORT signal)",
@@ -384,11 +384,3 @@ func TestToolChoiceKind(t *testing.T) {
 	require.Equal(t, "", toolChoiceKind(42))
 }
 
-func TestResponseFormatType(t *testing.T) {
-	require.Equal(t, "json_object", responseFormatType(map[string]any{"type": "json_object"}))
-	require.Equal(t, "json_schema", responseFormatType(map[string]any{"type": "json_schema", "json_schema": map[string]any{}}))
-	require.Equal(t, "text", responseFormatType(map[string]any{"type": "text"}))
-	require.Equal(t, "", responseFormatType(map[string]any{}))
-	require.Equal(t, "", responseFormatType("json_object"))
-	require.Equal(t, "", responseFormatType(nil))
-}
