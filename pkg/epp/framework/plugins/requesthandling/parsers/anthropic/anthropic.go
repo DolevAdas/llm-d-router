@@ -87,18 +87,16 @@ func (p *AnthropicParser) WithName(name string) *AnthropicParser {
 
 func (p *AnthropicParser) ParseRequest(_ context.Context, body []byte, headers map[string]string) (*fwkrh.ParseResult, error) {
 	path := request.GetRequestPath(headers)
+	if request.MatchPathSuffix(path, messagesAPI+"/render") {
+		return parserutil.ParseRenderRequest(body)
+	}
 
-	// The count_tokens endpoint returns only a token count and gains nothing from
-	// structured parsing or response interception; forward the body unchanged.
+	// count_tokens delegates token counting to the server and passes its response through.
 	if strings.HasSuffix(path, "/"+countTokensAPI) {
 		return &fwkrh.ParseResult{
 			Body:                   &fwkrh.InferenceRequestBody{Payload: fwkrh.RawPayload(body)},
 			SkipResponseProcessing: true,
 		}, nil
-	}
-
-	if request.MatchPathSuffix(path, messagesAPI+"/render") {
-		return parserutil.ParseRenderRequest(body)
 	}
 
 	if !strings.HasSuffix(path, "/"+messagesAPI) {

@@ -1374,7 +1374,6 @@ func TestOpenAIParser_ParseRequest(t *testing.T) {
 					}
 				}
 			}
-
 			// Model is extracted from the request body's "model" field.
 			tt.want.Model, _ = tt.body["model"].(string)
 

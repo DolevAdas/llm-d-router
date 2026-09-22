@@ -382,4 +382,12 @@ func TestToolChoiceKind(t *testing.T) {
 	require.Equal(t, "named", toolChoiceKind(namedToolChoice))
 	require.Equal(t, "", toolChoiceKind(nil))
 	require.Equal(t, "", toolChoiceKind(42))
+
+	// UnmarshalEnvelope stores tool_choice objects and strings as json.RawMessage
+	// on real chat-completions requests, so the classifier must decode both forms.
+	require.Equal(t, "named", toolChoiceKind(json.RawMessage(`{"type":"function","function":{"name":"get_weather"}}`)))
+	require.Equal(t, "required", toolChoiceKind(json.RawMessage(`"required"`)))
+	require.Equal(t, "none", toolChoiceKind(json.RawMessage(`"none"`)))
+	require.Equal(t, "", toolChoiceKind(json.RawMessage("")))
+	require.Equal(t, "", toolChoiceKind(json.RawMessage(`123`)))
 }

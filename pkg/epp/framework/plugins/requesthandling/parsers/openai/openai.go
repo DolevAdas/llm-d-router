@@ -189,8 +189,6 @@ func isStreamingRequest(apiType string, bodyMap map[string]any) bool {
 
 func tokenInputField(body *fwkrh.InferenceRequestBody) string {
 	switch {
-	case body.Completions != nil && len(body.Completions.Prompt.TokenIDs) > 0:
-		return "prompt"
 	case body.Embeddings != nil && len(body.Embeddings.Input.TokenIDs) > 0:
 		return "input"
 	default:

@@ -45,7 +45,7 @@ const (
 	// of observed CompletionTokens) in a follow-up PR.
 	UnknownOutputTokens int64 = 1000
 	// ShortOutputTokens is the flat output-token estimate for a SHORT
-	// (tool-call / structured-output) request.
+	// (tool-call) request.
 	ShortOutputTokens int64 = 100
 )
 
