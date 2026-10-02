@@ -36,8 +36,8 @@ func frame(t *testing.T, payload string) map[string]any {
 
 func TestSSEReassemble_Chat(t *testing.T) {
 	r := newSSEReassembler(sseShapeChat)
-	r.add(frame(t, `{"id":"cmpl-1","object":"chat.completion.chunk","created":100,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}`))
-	r.add(frame(t, `{"choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}`))
+	r.add(frame(t, `{"id":"cmpl-1","object":"chat.completion.chunk","created":100,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"He"},"finish_reason":null}]}`))
+	r.add(frame(t, `{"choices":[{"index":0,"delta":{"content":"llo"},"finish_reason":null}]}`))
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
 
@@ -64,8 +64,8 @@ func TestSSEReassemble_Chat(t *testing.T) {
 
 func TestSSEReassemble_Text(t *testing.T) {
 	r := newSSEReassembler(sseShapeText)
-	r.add(frame(t, `{"id":"cmpl-2","object":"text_completion","created":200,"model":"m","choices":[{"index":0,"text":"Hel","finish_reason":null}]}`))
-	r.add(frame(t, `{"choices":[{"index":0,"text":"lo","finish_reason":"length"}]}`))
+	r.add(frame(t, `{"id":"cmpl-2","object":"text_completion","created":200,"model":"m","choices":[{"index":0,"text":"He","finish_reason":null}]}`))
+	r.add(frame(t, `{"choices":[{"index":0,"text":"llo","finish_reason":"length"}]}`))
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`))
 
 	got := r.result()
@@ -102,7 +102,7 @@ func TestSSEReassemble_MultipleChoices(t *testing.T) {
 	byIndex := map[int]map[string]any{}
 	for _, c := range choices {
 		cm := c.(map[string]any)
-		idx := int(cm["index"].(int))
+		idx := cm["index"].(int)
 		byIndex[idx] = cm
 	}
 	require.Equal(t, "Aa", byIndex[0]["message"].(map[string]any)["content"])

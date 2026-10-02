@@ -202,8 +202,8 @@ func TestForceStream_Chat_ReassemblesToJSON(t *testing.T) {
 
 func TestForceStream_Text_ReassemblesToJSON(t *testing.T) {
 	frames := []string{
-		`{"id":"t-1","object":"text_completion","model":"llama-3","choices":[{"index":0,"text":"Hel"}]}`,
-		`{"id":"t-1","choices":[{"index":0,"text":"lo","finish_reason":"length"}]}`,
+		`{"id":"t-1","object":"text_completion","model":"llama-3","choices":[{"index":0,"text":"He"}]}`,
+		`{"id":"t-1","choices":[{"index":0,"text":"llo","finish_reason":"length"}]}`,
 		`{"id":"t-1","choices":[],"usage":{"total_tokens":3}}`,
 	}
 	server := sseServer(t, frames, nil)
@@ -218,7 +218,7 @@ func TestForceStream_Text_ReassemblesToJSON(t *testing.T) {
 		Model:            "llama-3",
 		Stream:           false,
 		KVTransferParams: map[string]any{},
-		Body:             map[string]any{"model": "llama-3", "stream": false, "max_tokens": 8, "prompt": "Hel"},
+		Body:             map[string]any{"model": "llama-3", "stream": false, "max_tokens": 8, "prompt": "Hello"},
 		ResponseWriter:   recorder,
 	}
 
