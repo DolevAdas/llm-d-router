@@ -320,6 +320,48 @@ func TestDecodeStep_UnreachableFormat_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestDecodeStep_NoneConnector_OmitsKVTransferParams verifies that the kv-none
+// connector (aggregated single-pod serving) forwards no kv_transfer_params, and
+// that a client-supplied key is stripped since the body is mutated in place.
+func TestDecodeStep_NoneConnector_OmitsKVTransferParams(t *testing.T) {
+	var parsed map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &parsed)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{ParamKVConnector: kv.None})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-agg",
+		OriginalPath: testChatCompletionsPath,
+		Model:        "test-model",
+		Stream:       false,
+		Body: map[string]any{
+			"model":  "test-model",
+			"stream": false,
+			// A client-supplied key must not survive to the pod.
+			reqcommon.FieldKVTransferParams: map[string]any{"block_id": "client"},
+		},
+		ResponseWriter: recorder,
+	}
+
+	if err := step.Execute(context.Background(), reqCtx); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if _, ok := parsed[reqcommon.FieldKVTransferParams]; ok {
+		t.Fatalf("kv-none must forward no kv_transfer_params, got %v", parsed[reqcommon.FieldKVTransferParams])
+	}
+}
+
 func TestDecodeStep_Streaming(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)

@@ -131,16 +131,23 @@ func (s *DecodeStep) prepareDecodeBody(ctx context.Context, reqCtx *pipeline.Req
 
 	switch format {
 	case reqcommon.APITypeChatCompletions, reqcommon.APITypeVLLMGenerate:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 	case reqcommon.APITypeCompletions:
-		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
 		if len(reqCtx.TokenIDs) > 0 {
 			reqCtx.Body["prompt"] = reqCtx.TokenIDs
 		}
 	default:
-		// kvParams and injectUUIDs above already ran; both are harmless here
+		// injectUUIDs above already mutated reqCtx.Body, but it is harmless here
 		// since the request fails on this return and reqCtx.Body is never sent.
 		return unreachableFormatError(format)
+	}
+
+	// A no-op connector (aggregated single-pod serving) returns no params, so the
+	// request carries no kv_transfer_params. Delete any client-supplied key in that
+	// case, since reqCtx.Body is mutated in place.
+	if len(kvParams) > 0 {
+		reqCtx.Body[reqcommon.FieldKVTransferParams] = kvParams
+	} else {
+		delete(reqCtx.Body, reqcommon.FieldKVTransferParams)
 	}
 	return nil
 }

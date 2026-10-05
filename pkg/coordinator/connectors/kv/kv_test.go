@@ -123,6 +123,13 @@ func TestConnectors_KVParams(t *testing.T) {
 			wantPrefill:    map[string]any{"do_remote_decode": true, "do_remote_prefill": false},
 			wantDecode:     map[string]any{"do_remote_decode": false, "do_remote_prefill": true},
 		},
+		{
+			// Aggregated serving: no handoff, so both directions return no params.
+			name:           None,
+			decodeIncoming: map[string]any{"ignored": "field"},
+			wantPrefill:    nil,
+			wantDecode:     nil,
+		},
 	}
 
 	for _, tc := range cases {
