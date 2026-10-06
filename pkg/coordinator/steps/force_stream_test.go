@@ -200,6 +200,61 @@ func TestForceStream_Chat_ReassemblesToJSON(t *testing.T) {
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation must be released after the reply")
 }
 
+func TestForceStream_Responses_ReassemblesToJSON(t *testing.T) {
+	completed := `{"id":"resp-1","object":"response","model":"llama-3","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}`
+	frames := []string{
+		`{"type":"response.created","response":{"id":"resp-1","model":"llama-3","status":"in_progress"}}`,
+		`{"type":"response.output_text.delta","delta":"Hello"}`,
+		`{"type":"response.output_text.delta","delta":" world"}`,
+		`{"type":"response.completed","response":` + completed + `}`,
+	}
+	var upstreamBody map[string]any
+	server := sseServer(t, frames, &upstreamBody)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-resp",
+		OriginalPath:     reqcommon.PathResponses,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model":             "llama-3",
+			"stream":            false,
+			"max_output_tokens": 16,
+			"input":             "hi",
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+
+	// The Responses API has no stream_options; force-stream must enable streaming
+	// without adding it (usage arrives in the response.completed event).
+	require.Equal(t, true, upstreamBody["stream"], "force-stream must send stream:true upstream")
+	_, hasOpts := upstreamBody["stream_options"]
+	require.False(t, hasOpts, "force-stream must not add stream_options for the Responses API")
+
+	result := recorder.Result()
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	require.Equal(t, "application/json", result.Header.Get("Content-Type"),
+		"client of a non-streaming request must receive JSON, not an event stream")
+
+	respBody, _ := io.ReadAll(result.Body)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(respBody, &got), "reassembled reply must be valid JSON")
+
+	var want map[string]any
+	require.NoError(t, json.Unmarshal([]byte(completed), &want))
+	require.Equal(t, want, got, "the forced reply must equal the pod's non-streaming response object")
+
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation must be released after the reply")
+}
+
 func TestForceStream_Text_ReassemblesToJSON(t *testing.T) {
 	frames := []string{
 		`{"id":"t-1","object":"text_completion","model":"llama-3","choices":[{"index":0,"text":"He"}]}`,

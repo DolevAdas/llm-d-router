@@ -136,6 +136,51 @@ func TestShapeForAPIType(t *testing.T) {
 	require.Equal(t, sseShapeChat, shapeForAPIType(reqcommon.APITypeChatCompletions))
 	require.Equal(t, sseShapeText, shapeForAPIType(reqcommon.APITypeCompletions))
 	require.Equal(t, sseShapeGenerate, shapeForAPIType(reqcommon.APITypeVLLMGenerate))
+	require.Equal(t, sseShapeResponses, shapeForAPIType(reqcommon.APITypeResponses))
+}
+
+// The Responses stream is typed events; response.completed carries the terminal
+// response object, which the reassembler emits verbatim. The deltas before it
+// drive only the per-request ceiling, so the reply is exactly the object the pod
+// would have returned non-streaming.
+func TestSSEReassemble_Responses(t *testing.T) {
+	completed := `{"id":"resp-1","object":"response","model":"llama-3","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}`
+
+	r := newSSEReassembler(sseShapeResponses)
+	r.add(frame(t, `{"type":"response.created","response":{"id":"resp-1","model":"llama-3","status":"in_progress"}}`))
+	r.add(frame(t, `{"type":"response.output_text.delta","delta":"Hello"}`))
+	r.add(frame(t, `{"type":"response.output_text.delta","delta":" world"}`))
+	r.add(frame(t, `{"type":"response.completed","response":`+completed+`}`))
+
+	// Only the generated text is charged to the ceiling, not the envelope.
+	require.EqualValues(t, len("Hello world"), r.bufferedBytes())
+
+	var want map[string]any
+	require.NoError(t, json.Unmarshal([]byte(completed), &want))
+	require.Equal(t, want, r.result())
+}
+
+// Without a response.completed event, a minimal response object is assembled
+// from the accumulated deltas so the client still gets a well-formed reply.
+func TestSSEReassemble_ResponsesNoCompleted(t *testing.T) {
+	r := newSSEReassembler(sseShapeResponses)
+	r.add(frame(t, `{"type":"response.created","response":{"id":"resp-2","model":"m","status":"in_progress"}}`))
+	r.add(frame(t, `{"type":"response.output_text.delta","delta":"hi"}`))
+
+	got := r.result()
+	require.Equal(t, "resp-2", got["id"])
+	require.Equal(t, "m", got["model"])
+	require.Equal(t, statusCompleted, got["status"])
+
+	output := got["output"].([]any)
+	require.Len(t, output, 1)
+	item := output[0].(map[string]any)
+	require.Equal(t, itemTypeMessage, item["type"])
+	require.Equal(t, roleAssistant, item["role"])
+	content := item["content"].([]any)
+	part := content[0].(map[string]any)
+	require.Equal(t, partTypeOutputText, part["type"])
+	require.Equal(t, "hi", part["text"])
 }
 
 // Frames mirror the real vLLM /inference/v1/generate stream: one token_id per

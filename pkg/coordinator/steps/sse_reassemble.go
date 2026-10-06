@@ -28,13 +28,16 @@ import (
 // reassembled reply in a message object; the legacy Completions API carries it
 // in choices[].text. vLLM's generate API is token-level: its chunks and reply
 // carry choices[].token_ids rather than text, under a request_id envelope with
-// no object/id/model fields.
+// no object/id/model fields. The Responses API streams typed events keyed by a
+// data-line type field (response.output_text.delta, response.completed) rather
+// than choices[]; its reply is a response object with an output array.
 type sseShape int
 
 const (
 	sseShapeChat sseShape = iota
 	sseShapeText
 	sseShapeGenerate
+	sseShapeResponses
 )
 
 // Streaming and non-streaming object values. A chat stream tags each chunk
@@ -47,12 +50,31 @@ const (
 	roleAssistant        = "assistant"
 )
 
+// Responses API streaming event types (the data-line "type" value) and the
+// field names a Responses reply carries that have no shared constant.
+// response.output_text.delta streams the generated text; response.completed
+// carries the terminal response object (full output array and usage).
+const (
+	responseEventOutputTextDelta = "response.output_text.delta"
+	responseEventCompleted       = "response.completed"
+	fieldResponse                = "response"
+	fieldDelta                   = "delta"
+	fieldStatus                  = "status"
+	fieldID                      = "id"
+	fieldText                    = "text"
+	itemTypeMessage              = "message"
+	partTypeOutputText           = "output_text"
+	statusCompleted              = "completed"
+)
+
 func shapeForAPIType(apiType reqcommon.APIType) sseShape {
 	switch apiType {
 	case reqcommon.APITypeChatCompletions:
 		return sseShapeChat
 	case reqcommon.APITypeVLLMGenerate:
 		return sseShapeGenerate
+	case reqcommon.APITypeResponses:
+		return sseShapeResponses
 	default:
 		return sseShapeText
 	}
@@ -96,6 +118,10 @@ type sseReassembler struct {
 
 	usage map[string]any
 
+	// responseObject is the terminal response object captured from the Responses
+	// shape's response.completed event, emitted verbatim as the reply.
+	responseObject map[string]any
+
 	contentBytes int64
 }
 
@@ -106,6 +132,10 @@ func newSSEReassembler(shape sseShape) *sseReassembler {
 // add folds one parsed SSE data frame. Frames with no choices (the trailing
 // usage frame) still contribute their usage block.
 func (r *sseReassembler) add(frame map[string]any) {
+	if r.shape == sseShapeResponses {
+		r.addResponses(frame)
+		return
+	}
 	r.captureMeta(frame)
 	if choices, ok := frame["choices"].([]any); ok {
 		for _, c := range choices {
@@ -116,6 +146,44 @@ func (r *sseReassembler) add(frame map[string]any) {
 	}
 	if usage, ok := frame["usage"].(map[string]any); ok {
 		r.mergeUsage(usage)
+	}
+}
+
+// addResponses folds one Responses API event, keyed by its data-line type.
+// Text deltas accumulate for the per-request ceiling and for the no-completed
+// fallback reply; response.completed captures the terminal response object the
+// reply is built from. Other events (response.created, response.in_progress)
+// seed id and model for the fallback.
+func (r *sseReassembler) addResponses(frame map[string]any) {
+	switch frame[reqcommon.FieldType] {
+	case responseEventOutputTextDelta:
+		if delta, ok := frame[fieldDelta].(string); ok {
+			r.choice(0).content.WriteString(delta)
+			r.contentBytes += int64(len(delta))
+		}
+	case responseEventCompleted:
+		if resp, ok := frame[fieldResponse].(map[string]any); ok {
+			r.responseObject = resp
+		}
+	default:
+		if resp, ok := frame[fieldResponse].(map[string]any); ok {
+			r.captureResponseMeta(resp)
+		}
+	}
+}
+
+// captureResponseMeta records the id and model the fallback reply needs, taken
+// from the response envelope an early event carries (first non-empty wins).
+func (r *sseReassembler) captureResponseMeta(resp map[string]any) {
+	if r.id == "" {
+		if id, ok := resp[fieldID].(string); ok {
+			r.id = id
+		}
+	}
+	if r.model == "" {
+		if model, ok := resp[reqcommon.FieldModel].(string); ok {
+			r.model = model
+		}
 	}
 }
 
@@ -253,6 +321,10 @@ func (r *sseReassembler) bufferedBytes() int64 {
 // chat choices that never carried a role default to assistant, matching a
 // non-streaming reply's shape.
 func (r *sseReassembler) result() map[string]any {
+	if r.shape == sseShapeResponses {
+		return r.responsesResult()
+	}
+
 	out := map[string]any{}
 	r.writeEnvelope(out)
 
@@ -269,6 +341,41 @@ func (r *sseReassembler) result() map[string]any {
 	// Chat and text non-streaming replies do carry usage, so it is folded there.
 	if r.usage != nil && r.shape != sseShapeGenerate {
 		out["usage"] = r.usage
+	}
+	return out
+}
+
+// responsesResult returns the Responses reply. response.completed carries the
+// terminal response object the pod would have returned non-streaming, so it is
+// emitted verbatim. When no completed event arrived, a minimal response object
+// is assembled from the accumulated output_text deltas so the client still gets
+// a well-formed reply rather than nothing.
+func (r *sseReassembler) responsesResult() map[string]any {
+	if r.responseObject != nil {
+		return r.responseObject
+	}
+
+	content := ""
+	if c, ok := r.choices[0]; ok {
+		content = c.content.String()
+	}
+	out := map[string]any{
+		fieldStatus: statusCompleted,
+		reqcommon.FieldOutput: []any{
+			map[string]any{
+				reqcommon.FieldType: itemTypeMessage,
+				reqcommon.FieldRole: roleAssistant,
+				reqcommon.FieldContent: []any{
+					map[string]any{reqcommon.FieldType: partTypeOutputText, fieldText: content},
+				},
+			},
+		},
+	}
+	if r.id != "" {
+		out[fieldID] = r.id
+	}
+	if r.model != "" {
+		out[reqcommon.FieldModel] = r.model
 	}
 	return out
 }
