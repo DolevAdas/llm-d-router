@@ -180,8 +180,9 @@ func TestForceStream_Chat_ReassemblesToJSON(t *testing.T) {
 		"client of a non-streaming request must receive JSON, not an event stream")
 
 	respBody, _ := io.ReadAll(result.Body)
-	require.Equal(t, strconv.Itoa(len(respBody)), result.Header.Get("Content-Length"),
-		"Content-Length must match the reassembled body")
+	require.Empty(t, result.Header.Get("Content-Length"),
+		"a chat single-choice reply is written incrementally (chunked), so it carries no Content-Length")
+	require.True(t, recorder.Flushed, "the incremental reply must be flushed to the client")
 
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(respBody, &got), "reassembled reply must be valid JSON")
@@ -409,16 +410,19 @@ func TestForceStream_FallbackBudget(t *testing.T) {
 	defer server.Close()
 
 	// Size the budget to exactly one request's reservation, then pre-reserve all
-	// of it so the request under test cannot fit and must fall back.
+	// of it so the request under test cannot fit and must fall back. A generate
+	// request takes the buffered path (only chat/text single-choice stream
+	// incrementally), so the budget still gates it.
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-fb",
-		OriginalPath:     reqcommon.PathChatCompletions,
+		OriginalPath:     reqcommon.PathVLLMGenerate,
 		Model:            "llama-3",
 		Stream:           false,
 		KVTransferParams: map[string]any{},
 		Body: map[string]any{
-			"model": "llama-3", "stream": false, "max_tokens": 10,
-			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1, 2, 3},
+			"sampling_params": map[string]any{"max_tokens": 10},
 		},
 		ResponseWriter: httptest.NewRecorder(),
 	}
@@ -449,24 +453,28 @@ func TestForceStream_NoTokenLimit_PassThrough(t *testing.T) {
 
 	step, reg := newForceStreamStep(t, server.URL, "1GiB")
 
+	// A generate request with no token cap takes the buffered path and is not
+	// reservable, so it falls through to the pass-through unchanged. Chat and text
+	// single-choice requests are instead streamed incrementally even without a cap
+	// (see TestForceStreamIncremental_NoTokenLimit_StillForced).
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-nolimit",
-		OriginalPath:     reqcommon.PathChatCompletions,
+		OriginalPath:     reqcommon.PathVLLMGenerate,
 		Model:            "llama-3",
 		Stream:           false,
 		KVTransferParams: map[string]any{},
 		Body: map[string]any{
 			"model": "llama-3", "stream": false,
-			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			"token_ids": []any{1, 2, 3},
 		},
 		ResponseWriter: recorder,
 	}
 
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 
-	// An unbounded request is never force-streamed and never counted; it takes
-	// the pass-through with its body (stream:false) unchanged.
+	// An unbounded buffered request is never force-streamed and never counted; it
+	// takes the pass-through with its body (stream:false) unchanged.
 	require.Equal(t, false, upstreamBody["stream"])
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
@@ -546,11 +554,12 @@ func TestForceStream_TransportError(t *testing.T) {
 }
 
 func TestForceStream_CeilingAbort(t *testing.T) {
-	// max_tokens=1 reserves a small per-request ceiling; stream content well past
-	// it to trip the abort before anything reaches the client.
+	// sampling_params.max_tokens=1 reserves a small per-request ceiling; stream
+	// token_ids well past it to trip the abort before anything reaches the client.
+	// Generate takes the buffered path, where the ceiling applies.
 	frames := make([]string, 0, 100)
 	for i := 0; i < 100; i++ {
-		frames = append(frames, `{"choices":[{"index":0,"delta":{"content":"0123456789012345678901234567890123456789"}}]}`)
+		frames = append(frames, `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3,4,5,6,7,8,9,10]}],"usage":null}`)
 	}
 	server := sseServer(t, frames, nil)
 	defer server.Close()
@@ -560,13 +569,14 @@ func TestForceStream_CeilingAbort(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	reqCtx := &pipeline.RequestContext{
 		RequestID:        "req-ceiling",
-		OriginalPath:     reqcommon.PathChatCompletions,
+		OriginalPath:     reqcommon.PathVLLMGenerate,
 		Model:            "llama-3",
 		Stream:           false,
 		KVTransferParams: map[string]any{},
 		Body: map[string]any{
-			"model": "llama-3", "stream": false, "max_tokens": 1,
-			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1},
+			"sampling_params": map[string]any{"max_tokens": 1},
 		},
 		ResponseWriter: recorder,
 	}
@@ -583,15 +593,16 @@ func TestForceStream_CeilingAbort(t *testing.T) {
 
 func TestForceStream_Concurrency(t *testing.T) {
 	frames := []string{
-		`{"id":"c","model":"llama-3","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
-		`{"id":"c","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"request_id":"c","choices":[{"index":0,"token_ids":[1,2]}],"usage":null}`,
+		`{"request_id":"c","choices":[{"index":0,"finish_reason":"length","token_ids":[3]}],"usage":{"total_tokens":3}}`,
 	}
 	server := sseServer(t, frames, nil)
 	defer server.Close()
 
-	// One request's reservation is ~2464 bytes (max_tokens=10); a budget of 5000
-	// admits only a couple at a time, so concurrent requests produce a mix of
-	// forced and budget-fallback outcomes.
+	// Generate takes the buffered path, where the budget gates each request. One
+	// request's reservation is ~2464 bytes (max_tokens=10); a budget of 5000 admits
+	// only a couple at a time, so concurrent requests produce a mix of forced and
+	// budget-fallback outcomes.
 	step, reg := newForceStreamStep(t, server.URL, "5000")
 
 	const n = 50
@@ -602,13 +613,14 @@ func TestForceStream_Concurrency(t *testing.T) {
 			defer wg.Done()
 			reqCtx := &pipeline.RequestContext{
 				RequestID:        "req-c",
-				OriginalPath:     reqcommon.PathChatCompletions,
+				OriginalPath:     reqcommon.PathVLLMGenerate,
 				Model:            "llama-3",
 				Stream:           false,
 				KVTransferParams: map[string]any{},
 				Body: map[string]any{
-					"model": "llama-3", "stream": false, "max_tokens": 10,
-					"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+					"model": "llama-3", "stream": false,
+					"token_ids":       []any{1},
+					"sampling_params": map[string]any{"max_tokens": 10},
 				},
 				ResponseWriter: httptest.NewRecorder(),
 			}

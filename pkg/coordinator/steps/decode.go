@@ -80,11 +80,16 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	// Force-streaming applies only to a client that asked for a non-streaming
-	// reply and only while budget remains to buffer it. A request with no token
-	// limit (unbounded) or a full budget falls through to the pass-through below,
-	// which buffers nothing.
+	// Force-streaming applies only to a non-streaming request. The chat and text
+	// single-choice shapes are written incrementally, with no reservation. The
+	// buffered shapes (responses, generate, n>1) cannot be sent in pieces, so they
+	// still reserve budget; one with no token limit or a full budget falls through
+	// to the pass-through below, which buffers nothing.
 	if s.forceStream && !reqCtx.Stream {
+		shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
+		if canStreamIncrementally(shape, reqCtx) {
+			return s.executeForceStreamIncremental(ctx, logger, reqCtx, shape)
+		}
 		if reserved, ok := s.estimateReservation(reqCtx); ok {
 			if s.budget.tryReserve(reserved) {
 				return s.executeForceStream(ctx, logger, reqCtx, reserved)

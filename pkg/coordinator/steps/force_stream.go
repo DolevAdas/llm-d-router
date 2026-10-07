@@ -153,15 +153,10 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 
 	shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
 
-	body := forceStreamBody(reqCtx.Body, shape)
-	bodyBytes, err := json.Marshal(body)
+	bodyBytes, headers, err := buildForceStreamRequest(reqCtx, shape)
 	if err != nil {
-		return fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
+		return err
 	}
-
-	headers := reqCtx.ForwardedHeaders()
-	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = gateway.PhaseDecode
 
 	logger.V(logutil.DEFAULT).Info("force-streaming request", "path", reqCtx.OriginalPath, "reservedBytes", reserved)
 	if v := logger.V(logutil.DEBUG); v.Enabled() {
@@ -192,6 +187,19 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	}
 
 	return writeForcedResponse(logger, reqCtx, reassembler)
+}
+
+// buildForceStreamRequest marshals the forced (stream:true) decode body and
+// builds its forwarding headers, shared by the buffered and incremental paths.
+func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([]byte, map[string]string, error) {
+	bodyBytes, err := json.Marshal(forceStreamBody(reqCtx.Body, shape))
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
+	}
+	headers := reqCtx.ForwardedHeaders()
+	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
+	headers[gateway.EPPProfileHeader] = gateway.PhaseDecode
+	return bodyBytes, headers, nil
 }
 
 // forceStreamBody clones the prepared decode body, enables streaming, and asks
