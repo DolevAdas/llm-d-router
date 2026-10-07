@@ -81,20 +81,28 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	}
 
 	// Force-streaming applies only to a non-streaming request. The chat and text
-	// single-choice shapes are written incrementally, with no reservation. The
-	// buffered shapes (responses, generate, n>1) cannot be sent in pieces, so they
-	// still reserve budget; one with no token limit or a full budget falls through
-	// to the pass-through below, which buffers nothing.
+	// single-choice shapes are written incrementally, with no reservation; the
+	// buffered shapes (responses, generate, n>1) reserve budget. A chat or text
+	// request whose reply may carry fields the reassembler drops (tool calls,
+	// logprobs), one with no token limit, or one that finds the budget full falls
+	// through to the pass-through below, which buffers nothing.
 	if s.forceStream && !reqCtx.Stream {
 		shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
-		if canStreamIncrementally(shape, reqCtx) {
+		switch {
+		case forceStreamLossy(shape, reqCtx.Body):
+			coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackUnsupported)
+		case canStreamIncrementally(shape, reqCtx):
 			return s.executeForceStreamIncremental(ctx, logger, reqCtx, shape)
-		}
-		if reserved, ok := s.estimateReservation(reqCtx); ok {
-			if s.budget.tryReserve(reserved) {
+		default:
+			reserved, ok := s.estimateReservation(reqCtx)
+			switch {
+			case !ok:
+				coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackUnbounded)
+			case s.budget.tryReserve(reserved):
 				return s.executeForceStream(ctx, logger, reqCtx, reserved)
+			default:
+				coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackBudget)
 			}
-			coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackBudget)
 		}
 	}
 

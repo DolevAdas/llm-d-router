@@ -473,11 +473,66 @@ func TestForceStream_NoTokenLimit_PassThrough(t *testing.T) {
 
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 
-	// An unbounded buffered request is never force-streamed and never counted; it
-	// takes the pass-through with its body (stream:false) unchanged.
+	// An unbounded buffered request is not force-streamed (no limit to reserve); it
+	// takes the pass-through with its body (stream:false) unchanged and is counted
+	// as fallback_unbounded.
 	require.Equal(t, false, upstreamBody["stream"])
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnbounded), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
+}
+
+// TestForceStream_LossyRequest_PassThrough verifies that a chat or text request
+// whose reply could carry fields the reassembler drops (tool/function calls or
+// logprobs) is not force-streamed: it takes the pass-through unchanged and is
+// counted as fallback_unsupported.
+func TestForceStream_LossyRequest_PassThrough(t *testing.T) {
+	cases := []struct {
+		name  string
+		path  string
+		extra map[string]any
+	}{
+		{"chat tools", reqcommon.PathChatCompletions, map[string]any{"tools": []any{map[string]any{"type": "function"}}}},
+		{"chat functions", reqcommon.PathChatCompletions, map[string]any{"functions": []any{map[string]any{"name": "f"}}}},
+		{"chat logprobs", reqcommon.PathChatCompletions, map[string]any{"logprobs": true}},
+		{"completions logprobs", reqcommon.PathCompletions, map[string]any{"logprobs": 5}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var upstreamBody map[string]any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				_ = json.Unmarshal(raw, &upstreamBody)
+				_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}}})
+			}))
+			defer server.Close()
+
+			step, reg := newForceStreamStep(t, server.URL, "1GiB")
+			body := map[string]any{"model": "llama-3", "stream": false, "max_tokens": 16}
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+			if tc.path == reqcommon.PathChatCompletions {
+				body["messages"] = []any{map[string]any{"role": "user", "content": "hi"}}
+			} else {
+				body["prompt"] = "hi"
+			}
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-lossy",
+				OriginalPath:     tc.path,
+				Model:            "llama-3",
+				Stream:           false,
+				KVTransferParams: map[string]any{},
+				Body:             body,
+				ResponseWriter:   httptest.NewRecorder(),
+			}
+			require.NoError(t, step.Execute(context.Background(), reqCtx))
+
+			require.Equal(t, false, upstreamBody["stream"], "a lossy request must pass through with its non-streaming body unchanged")
+			require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+			require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+		})
+	}
 }
 
 func TestForceStream_UpstreamError_ForwardsVerbatim(t *testing.T) {

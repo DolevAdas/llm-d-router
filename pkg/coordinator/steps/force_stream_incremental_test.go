@@ -50,6 +50,10 @@ func chatIncrementalReqCtx(w http.ResponseWriter) *pipeline.RequestContext {
 	}
 }
 
+// TestCanStreamIncrementally checks the shape and choice-count gate for the
+// incremental path: chat and text with a single choice qualify, while n>1
+// (interleaved choices) and the generate and responses shapes take the buffered
+// path.
 func TestCanStreamIncrementally(t *testing.T) {
 	require.True(t, canStreamIncrementally(sseShapeChat,
 		&pipeline.RequestContext{OriginalPath: reqcommon.PathChatCompletions, Body: map[string]any{}}))
@@ -63,6 +67,24 @@ func TestCanStreamIncrementally(t *testing.T) {
 		&pipeline.RequestContext{OriginalPath: reqcommon.PathVLLMGenerate, Body: map[string]any{}}))
 	require.False(t, canStreamIncrementally(sseShapeResponses,
 		&pipeline.RequestContext{OriginalPath: reqcommon.PathResponses, Body: map[string]any{}}))
+}
+
+func TestForceStreamLossy(t *testing.T) {
+	// chat and text requests that may carry tool/function calls or logprobs are lossy.
+	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"tools": []any{map[string]any{"type": "function"}}}))
+	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"functions": []any{map[string]any{"name": "f"}}}))
+	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"logprobs": true}))
+	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": 3}))
+
+	// Absent, empty, or false forms are not lossy.
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{}))
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"tools": []any{}}))
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"logprobs": false}))
+
+	// The responses shape emits the upstream object verbatim and generate has no
+	// such fields, so neither is ever lossy even when the request declares them.
+	require.False(t, forceStreamLossy(sseShapeResponses, map[string]any{"tools": []any{map[string]any{"type": "function"}}}))
+	require.False(t, forceStreamLossy(sseShapeGenerate, map[string]any{"logprobs": true}))
 }
 
 // TestForceStreamIncremental_EqualsBuffered is the core correctness check: the

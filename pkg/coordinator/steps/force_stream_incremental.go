@@ -266,11 +266,12 @@ func (e *incrementalEmitter) ensureStarted() error {
 	}
 	e.w.Header().Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
 	e.w.WriteHeader(http.StatusOK)
-	if _, err := e.w.Write(e.prefix()); err != nil {
-		return err
-	}
+	// The response is committed once the status is written, so mark started before
+	// the body write: a failed prefix write must truncate, not be mistaken for an
+	// uncommitted request that the server could still answer with a clean 5xx.
 	e.started = true
-	return nil
+	_, err := e.w.Write(e.prefix())
+	return err
 }
 
 // finish writes the suffix once the stream ends. An empty completion still gets

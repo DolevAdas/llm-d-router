@@ -100,8 +100,9 @@ type sseChoice struct {
 //
 // Only the fields a non-streaming reply needs are folded: text content or token
 // ids, role, finish_reason, and usage. A chat delta's tool_calls, function_call,
-// and logprobs are not reassembled; a request using those is served by the
-// non-forced pass-through, so force-streaming is left off for them.
+// and logprobs are not reassembled; the decode step leaves force-streaming off
+// for a chat or text request that declares tools, functions, or logprobs (see
+// forceStreamLossy), so such a reply takes the pass-through instead.
 type sseReassembler struct {
 	shape sseShape
 
@@ -164,6 +165,11 @@ func (r *sseReassembler) addResponses(frame map[string]any) {
 	case responseEventCompleted:
 		if resp, ok := frame[fieldResponse].(map[string]any); ok {
 			r.responseObject = resp
+			// The accumulated deltas fed only the ceiling and the no-completed
+			// fallback; the completed object supersedes them, so release them
+			// rather than hold the content twice.
+			r.choices = map[int]*sseChoice{}
+			r.order = nil
 		}
 	default:
 		if resp, ok := frame[fieldResponse].(map[string]any); ok {

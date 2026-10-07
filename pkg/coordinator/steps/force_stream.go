@@ -74,9 +74,12 @@ var errForceStreamCeiling = errors.New("force-stream: buffered response exceeded
 
 // sseDataPrefix and sseDoneMarker delimit the SSE frames the upstream streams.
 // Each data line carries one JSON object; the stream ends with data: [DONE].
+// sseDataPrefix is intentionally the bare "data:" without the trailing space
+// reqcommon.SSEDataPrefix carries, since ssePayload trims surrounding space and
+// so matches both framings.
 var (
 	sseDataPrefix = []byte("data:")
-	sseDoneMarker = []byte("[DONE]")
+	sseDoneMarker = []byte(reqcommon.SSEDoneMarker)
 )
 
 // parseForceStreamBudget reads force_stream_buffer_size into a byte budget,
@@ -189,6 +192,32 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	return writeForcedResponse(logger, reqCtx, reassembler)
 }
 
+// forceStreamLossy reports whether force-streaming would drop fields the
+// reassembler does not fold. The chat and text shapes fold only generated text,
+// so a request that may produce tool calls, function calls, or logprobs takes
+// the pass-through to keep them. The responses shape emits the upstream object
+// verbatim (keeping those fields) and generate has none, so neither is lossy.
+func forceStreamLossy(shape sseShape, body map[string]any) bool {
+	if shape != sseShapeChat && shape != sseShapeText {
+		return false
+	}
+	if tools, ok := body[reqcommon.FieldTools].([]any); ok && len(tools) > 0 {
+		return true
+	}
+	if fns, ok := body[reqcommon.FieldFunctions].([]any); ok && len(fns) > 0 {
+		return true
+	}
+	switch lp := body[reqcommon.FieldLogprobs].(type) {
+	case bool:
+		return lp
+	case float64:
+		return lp > 0
+	case int:
+		return lp > 0
+	}
+	return false
+}
+
 // buildForceStreamRequest marshals the forced (stream:true) decode body and
 // builds its forwarding headers, shared by the buffered and incremental paths.
 func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([]byte, map[string]string, error) {
@@ -209,10 +238,10 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	body := maps.Clone(src)
 	body[reqcommon.FieldStream] = true
 
-	// The Responses API has no stream_options and reports usage in its
-	// response.completed event. The other shapes emit a usage block only when
-	// asked, so request one.
-	if shape != sseShapeResponses {
+	// Only the chat and text shapes return a usage block, and only when asked, so
+	// request one for them. The Responses API has no stream_options (usage arrives
+	// in response.completed), and the generate reply carries no usage block.
+	if shape == sseShapeChat || shape == sseShapeText {
 		opts := map[string]any{}
 		if existing, ok := body[reqcommon.FieldStreamOptions].(map[string]any); ok {
 			maps.Copy(opts, existing)

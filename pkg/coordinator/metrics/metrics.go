@@ -75,16 +75,21 @@ const (
 	ProbeResultTransportError = "transport_error"
 )
 
-// Result label values for force_stream_total. Forced is a request the
-// coordinator streamed from the upstream and reassembled into one non-streaming
-// response. FallbackBudget is a request that could have been forced but found
-// the buffer budget full, so it took the non-forced pass-through instead.
-// ErrorCeiling is a forced request whose reassembled response exceeded its
-// reserved budget and was aborted before any bytes reached the client.
+// Result label values for force_stream_total, one per candidate outcome. Forced
+// is a request the coordinator streamed from the upstream and reassembled into
+// one non-streaming response. FallbackBudget could have been forced but found
+// the buffer budget full. FallbackUnbounded is a buffered-shape request with no
+// output token limit, which cannot be reserved. FallbackUnsupported is a chat or
+// text request whose reply may carry fields the reassembler drops (tool or
+// function calls, logprobs). ErrorCeiling is a forced request whose reassembled
+// response exceeded its reserved budget and was aborted before any bytes reached
+// the client. The three fallback outcomes take the non-forced pass-through.
 const (
-	ForceStreamResultForced         = "forced"
-	ForceStreamResultFallbackBudget = "fallback_budget"
-	ForceStreamResultErrorCeiling   = "error_ceiling"
+	ForceStreamResultForced              = "forced"
+	ForceStreamResultFallbackBudget      = "fallback_budget"
+	ForceStreamResultFallbackUnbounded   = "fallback_unbounded"
+	ForceStreamResultFallbackUnsupported = "fallback_unsupported"
+	ForceStreamResultErrorCeiling        = "error_ceiling"
 )
 
 var (

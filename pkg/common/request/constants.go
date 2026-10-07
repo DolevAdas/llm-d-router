@@ -63,6 +63,9 @@ const (
 	FieldMMProcessorKwargs    = "mm_processor_kwargs"
 	FieldMediaIOKwargs        = "media_io_kwargs"
 	FieldOutput               = "output"
+	FieldTools                = "tools"
+	FieldFunctions            = "functions"
+	FieldLogprobs             = "logprobs"
 
 	// SGLang bootstrap coordination fields, carried inside kv_transfer_params.
 	// The prefill pod echoes them back so the decode pod can open the bootstrap
