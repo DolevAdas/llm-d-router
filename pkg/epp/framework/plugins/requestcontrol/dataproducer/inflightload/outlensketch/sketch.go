@@ -31,6 +31,7 @@ package outlensketch
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/cespare/xxhash/v2"
@@ -97,7 +98,7 @@ type Sketch struct {
 func (cfg Config) validate() error {
 	switch {
 	case cfg.ModelDir == "":
-		return fmt.Errorf("modelDir is required")
+		return errors.New("modelDir is required")
 	case cfg.Quantile <= 0 || cfg.Quantile > 1:
 		return fmt.Errorf("quantile must be in (0, 1], got %v", cfg.Quantile)
 	case cfg.Centroids < 1:

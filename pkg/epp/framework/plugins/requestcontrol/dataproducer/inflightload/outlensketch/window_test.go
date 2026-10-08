@@ -107,6 +107,13 @@ func TestHeadTailShortTextUnchanged(t *testing.T) {
 	}
 }
 
+func TestHeadTailHeadOnly(t *testing.T) {
+	// headFrac >= 1.0 keeps only the head.
+	if got := headTail("abcdefghij", 4, 1.0); got != "abcd" {
+		t.Errorf("head-only headTail = %q, want %q", got, "abcd")
+	}
+}
+
 func TestWindowRunesNotBytes(t *testing.T) {
 	// Multi-byte runes must be counted as single characters, so a budget-length
 	// slice never splits a rune.
