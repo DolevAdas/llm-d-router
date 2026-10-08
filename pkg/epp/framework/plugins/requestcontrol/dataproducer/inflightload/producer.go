@@ -116,8 +116,8 @@ func buildTokenEstimator(cfg Config) (TokenEstimator, error) {
 	case "", outputEstimatorStatic:
 		return NewSimpleTokenEstimator(cfg.MaxEstimatedOutputTokens), nil
 	case outputEstimatorSketch:
-		if cfg.Sketch == nil || cfg.Sketch.ModelDir == "" {
-			return nil, fmt.Errorf("outputEstimator %q requires sketch.modelDir", outputEstimatorSketch)
+		if cfg.Sketch == nil {
+			return nil, fmt.Errorf("outputEstimator %q requires a sketch configuration with modelDir", outputEstimatorSketch)
 		}
 		sc := outlensketch.DefaultConfig()
 		sc.ModelDir = cfg.Sketch.ModelDir
@@ -698,8 +698,12 @@ func (p *InFlightLoadProducer) ResponseBody(
 		if request.Body != nil && resp.Usage.CompletionTokens > 0 {
 			// Feed the observed output length to a learning estimator (e.g. the
 			// output-length sketch); the static estimator does not implement this.
-			if observer, ok := p.tokenEstimator.(OutputObserver); ok {
-				observer.Observe(request, int64(resp.Usage.CompletionTokens))
+			// Gated on addEstimatedOutputTokens: when output estimates are not
+			// consumed, there is no reason to pay the per-completion learning cost.
+			if p.addEstimatedOutputTokens {
+				if observer, ok := p.tokenEstimator.(OutputObserver); ok {
+					observer.Observe(request, int64(resp.Usage.CompletionTokens))
+				}
 			}
 			if bucket, ok := fwksched.ReadRequestAttribute[outlenbucket.Bucket](request, outlenbucket.AttributeKey); ok {
 				log.FromContext(ctx).V(logutil.VERBOSE).Info("outlen actual",

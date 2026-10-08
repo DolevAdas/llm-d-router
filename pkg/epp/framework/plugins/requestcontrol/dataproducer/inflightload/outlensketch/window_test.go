@@ -61,6 +61,20 @@ func TestKeptTurnsSingleUserDedup(t *testing.T) {
 	}
 }
 
+func TestKeptTurnsDropsAssistant(t *testing.T) {
+	// A trailing assistant turn must not become the last user turn.
+	kept := keptTurns([]fwkrh.Message{msg("user", "u1"), msg("assistant", "a1")})
+	if len(kept) != 1 || kept[0] != (keptTurn{shareFirstUser, "u1"}) {
+		t.Errorf("user+assistant kept = %+v, want only first_user u1 (assistant dropped)", kept)
+	}
+	// Assistants between users are dropped; first and last user are the user turns.
+	kept = keptTurns([]fwkrh.Message{msg("user", "u1"), msg("assistant", "a1"), msg("user", "u2")})
+	want := []keptTurn{{shareFirstUser, "u1"}, {shareLastUser, "u2"}}
+	if len(kept) != len(want) || kept[0] != want[0] || kept[1] != want[1] {
+		t.Errorf("user/assistant/user kept = %+v, want %+v", kept, want)
+	}
+}
+
 func TestKeptTurnsUnlabeledIsUser(t *testing.T) {
 	kept := keptTurns([]fwkrh.Message{msg("", "blob")})
 	if len(kept) != 1 || kept[0].shareIdx != shareFirstUser {

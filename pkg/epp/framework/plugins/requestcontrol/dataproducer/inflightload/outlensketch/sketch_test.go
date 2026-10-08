@@ -51,6 +51,23 @@ func userReq(text string) *fwkrh.InferenceRequestBody {
 	}
 }
 
+func TestConfigValidation(t *testing.T) {
+	if err := (Config{}).validate(); err == nil {
+		t.Error("empty config (no modelDir) must fail validation")
+	}
+	bad := DefaultConfig()
+	bad.ModelDir = "/x"
+	bad.Quantile = 1.5
+	if err := bad.validate(); err == nil {
+		t.Error("quantile > 1 must fail validation")
+	}
+	ok := DefaultConfig()
+	ok.ModelDir = "/x"
+	if err := ok.validate(); err != nil {
+		t.Errorf("default config with modelDir should validate, got %v", err)
+	}
+}
+
 func TestSketchColdAbstains(t *testing.T) {
 	s := newTestSketch(t)
 	if _, ok := s.Predict(userReq("solve problem")); ok {

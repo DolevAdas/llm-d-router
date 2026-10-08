@@ -135,10 +135,11 @@ func keptTurns(messages []fwkrh.Message) []keptTurn {
 			if !haveSystem { // first system turn
 				system, haveSystem = text, true
 			}
+		case "user", "": // an unlabeled turn counts as user, matching the study
+			users = append(users, text)
 		case "tool":
 			lastTool, haveTool = text, true
-		default: // "user" and any unlabeled turn
-			users = append(users, text)
+		default: // assistant and any other role carry no request cue; dropped
 		}
 	}
 

@@ -31,6 +31,7 @@ package outlensketch
 
 import (
 	"encoding/binary"
+	"fmt"
 
 	"github.com/cespare/xxhash/v2"
 
@@ -92,8 +93,38 @@ type Sketch struct {
 	hist     *histogramStore
 }
 
+// validate rejects a configuration that would make the sketch misbehave silently.
+func (cfg Config) validate() error {
+	switch {
+	case cfg.ModelDir == "":
+		return fmt.Errorf("modelDir is required")
+	case cfg.Quantile <= 0 || cfg.Quantile > 1:
+		return fmt.Errorf("quantile must be in (0, 1], got %v", cfg.Quantile)
+	case cfg.Centroids < 1:
+		return fmt.Errorf("centroids must be positive, got %d", cfg.Centroids)
+	case cfg.DecayHalfLifeRequests < 1:
+		return fmt.Errorf("decayHalfLifeRequests must be positive, got %d", cfg.DecayHalfLifeRequests)
+	case cfg.WarmupSamples < 1:
+		return fmt.Errorf("warmupSamples must be positive, got %v", cfg.WarmupSamples)
+	case cfg.WarmupBatch < 1:
+		return fmt.Errorf("warmupBatch must be positive, got %d", cfg.WarmupBatch)
+	case cfg.MaxKeys < 1:
+		return fmt.Errorf("maxKeys must be positive, got %d", cfg.MaxKeys)
+	case cfg.LloydIterations < 1:
+		return fmt.Errorf("lloydIterations must be positive, got %d", cfg.LloydIterations)
+	case cfg.MinCentroidMembers < 1:
+		return fmt.Errorf("minCentroidMembers must be positive, got %d", cfg.MinCentroidMembers)
+	case cfg.MinCentroidCoverage <= 0 || cfg.MinCentroidCoverage > 1:
+		return fmt.Errorf("minCentroidCoverage must be in (0, 1], got %v", cfg.MinCentroidCoverage)
+	}
+	return nil
+}
+
 // New builds a Sketch, loading the embedding model from cfg.ModelDir.
 func New(cfg Config) (*Sketch, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	emb, err := newEmbedder(cfg.ModelDir)
 	if err != nil {
 		return nil, err
@@ -141,7 +172,7 @@ func (s *Sketch) Observe(body *fwkrh.InferenceRequestBody, completionTokens int6
 // cluster folded with the signal signature.
 func (s *Sketch) features(body *fwkrh.InferenceRequestBody) (emb []float32, key uint64, hasPrompt bool) {
 	windowed := windowedPrompt(body)
-	sig := signalSig(body, windowed)
+	sig := signalSig(body)
 	if windowed == "" {
 		return nil, sig, false
 	}

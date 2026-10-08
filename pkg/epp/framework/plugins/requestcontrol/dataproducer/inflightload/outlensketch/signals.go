@@ -36,7 +36,7 @@ import (
 //
 // The hash value need not match any other process -- the sketch builds its own
 // histograms -- it need only map identical signal combinations to the same key.
-func signalSig(body *fwkrh.InferenceRequestBody, windowed string) uint64 {
+func signalSig(body *fwkrh.InferenceRequestBody) uint64 {
 	payload := payloadMap(body)
 	s := fmt.Sprintf("%s|%d|%d|%s|%d|%s|%d|%d|%d|%d",
 		body.Model,
@@ -48,7 +48,7 @@ func signalSig(body *fwkrh.InferenceRequestBody, windowed string) uint64 {
 		maxOutputBucket(body.MaxOutputTokens),
 		thinkingBudgetBucket(body),
 		numMessagesBucket(body),
-		boolToInt(hasCode(windowed)),
+		boolToInt(hasCode(body)),
 	)
 	return xxhash.Sum64String(s)
 }
@@ -117,10 +117,19 @@ func maxOutputBucket(maxOutputTokens *int64) int {
 	return 2
 }
 
-// hasCode reports whether the (windowed) prompt text carries code markers. Scanning
-// the window rather than the full prompt keeps the signal bounded on the hot path.
-func hasCode(text string) bool {
-	return containsAny(text, "```", "def ", "{\n")
+// hasCode reports whether any chat message carries code markers, matching the
+// study's has_code feature over the full prompt. The scan is a bounded substring
+// search over text already in memory.
+func hasCode(body *fwkrh.InferenceRequestBody) bool {
+	if body.ChatCompletions == nil {
+		return false
+	}
+	for _, m := range body.ChatCompletions.Messages {
+		if containsAny(m.Content.PlainText(), "```", "def ", "{\n") {
+			return true
+		}
+	}
+	return false
 }
 
 func hasTools(body *fwkrh.InferenceRequestBody) bool {

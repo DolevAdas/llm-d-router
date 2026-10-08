@@ -31,26 +31,27 @@ func chatBody() *fwkrh.InferenceRequestBody {
 }
 
 func TestSignalSigStableAndDistinct(t *testing.T) {
-	a := signalSig(chatBody(), "hi")
-	if a != signalSig(chatBody(), "hi") {
+	a := signalSig(chatBody())
+	if a != signalSig(chatBody()) {
 		t.Error("signalSig must be stable for identical inputs")
 	}
 
 	withTools := chatBody()
 	withTools.ChatCompletions.Tools = []any{map[string]any{"type": "function"}}
-	if signalSig(withTools, "hi") == a {
+	if signalSig(withTools) == a {
 		t.Error("adding tools must change the signature")
 	}
 
 	withReasoning := chatBody()
 	withReasoning.Payload = fwkrh.PayloadMap{"reasoning_effort": "high"}
-	if signalSig(withReasoning, "hi") == a {
+	if signalSig(withReasoning) == a {
 		t.Error("reasoning_effort=high must change the signature")
 	}
 
-	// has_code is derived from the windowed text, so the text participates.
-	if signalSig(chatBody(), "```go\nx:=1\n```") == a {
-		t.Error("code in the window must change the signature")
+	withCode := chatBody()
+	withCode.ChatCompletions.Messages = []fwkrh.Message{msg("user", "```go\nx:=1\n```")}
+	if signalSig(withCode) == a {
+		t.Error("code in the prompt must change the signature")
 	}
 }
 
