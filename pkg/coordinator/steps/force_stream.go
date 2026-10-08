@@ -225,9 +225,7 @@ func buildForceStreamRequest(reqCtx *pipeline.RequestContext, shape sseShape) ([
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: force-stream marshal: %w", DecodeStepName, err)
 	}
-	headers := reqCtx.ForwardedHeaders()
-	headers[reqcommon.RequestIDHeaderKey] = reqCtx.RequestID
-	headers[gateway.EPPProfileHeader] = gateway.PhaseDecode
+	headers := gatewayHeaders(reqCtx, gateway.PhaseDecode)
 	return bodyBytes, headers, nil
 }
 
@@ -303,7 +301,7 @@ func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, re
 	}
 
 	w := reqCtx.ResponseWriter
-	w.Header().Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+	w.Header().Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(payload); err != nil {
@@ -325,7 +323,7 @@ func forwardUpstreamError(reqCtx *pipeline.RequestContext, resp *http.Response) 
 	respBody := readErrorBody(resp.Body)
 	contentType := resp.Header.Get(gateway.ContentTypeHeader)
 	if contentType == "" {
-		contentType = gateway.ContentTypeJSON
+		contentType = reqcommon.ContentTypeJSON
 	}
 
 	w := reqCtx.ResponseWriter

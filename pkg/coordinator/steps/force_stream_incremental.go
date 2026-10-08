@@ -264,7 +264,7 @@ func (e *incrementalEmitter) ensureStarted() error {
 	if e.started {
 		return nil
 	}
-	e.w.Header().Set(gateway.ContentTypeHeader, gateway.ContentTypeJSON)
+	e.w.Header().Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	e.w.WriteHeader(http.StatusOK)
 	// The response is committed once the status is written, so mark started before
 	// the body write: a failed prefix write must truncate, not be mistaken for an
