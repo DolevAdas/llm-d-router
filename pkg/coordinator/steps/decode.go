@@ -80,12 +80,13 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 		return err
 	}
 
-	// Force-streaming applies only to a non-streaming request. The chat and text
-	// single-choice shapes are written incrementally, with no reservation; the
-	// buffered shapes (responses, generate, n>1) reserve budget. A chat or text
+	// Force-streaming applies only to a non-streaming request. A chat or text
 	// request whose reply may carry fields the reassembler drops (tool calls,
-	// logprobs), one with no token limit, or one that finds the budget full falls
-	// through to the pass-through below, which buffers nothing.
+	// logprobs) takes the pass-through to keep them. A chat or text single-choice
+	// reply is written incrementally, with no reservation. The buffered shapes
+	// (responses, generate, n>1) reserve budget and reassemble the whole reply;
+	// one with no output token limit to reserve, or one that finds the budget
+	// full, falls through to the pass-through below, which buffers nothing.
 	if s.forceStream && !reqCtx.Stream {
 		shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
 		switch {
