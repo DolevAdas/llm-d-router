@@ -142,28 +142,47 @@ func New(cfg Config) (*Sketch, error) {
 	return &Sketch{embedder: emb, key: key, hist: hist}, nil
 }
 
-// Predict returns the estimated output-token magnitude for the request, or
-// ok=false when its key is cold (abstain -- the caller applies its own fallback).
-func (s *Sketch) Predict(body *fwkrh.InferenceRequestBody) (magnitude int64, ok bool) {
-	if body == nil {
-		return 0, false
-	}
-	_, key, _ := s.features(body)
-	return s.hist.predict(key)
+// Prediction is a request's output-length estimate together with the featurization
+// it was derived from (the prompt embedding and the histogram key). Holding the
+// embedding lets the caller feed the same features back to Learn at end-of-stream
+// without re-windowing and re-embedding the prompt, and keeps the learned key
+// identical to the predicted one even if the centroids drift in between.
+type Prediction struct {
+	// Magnitude is the estimated output-token count; meaningful only when OK.
+	Magnitude int64
+	// OK is false when the key is cold (abstain -- the caller applies its own
+	// fallback).
+	OK bool
+
+	valid     bool // set for a prediction derived from a non-nil request body
+	emb       []float32
+	key       uint64
+	hasPrompt bool
 }
 
-// Observe folds a completed request's output length into the sketch: it nudges the
-// AdaptiveKey centroids toward the prompt embedding and updates the key's
-// output-length histogram. Non-positive lengths are ignored.
-func (s *Sketch) Observe(body *fwkrh.InferenceRequestBody, completionTokens int64) {
-	if body == nil || completionTokens <= 0 {
-		return
+// Predict featurizes the request and reads its output-length estimate. The returned
+// Prediction also carries the features, to be passed back to Learn at end-of-stream.
+func (s *Sketch) Predict(body *fwkrh.InferenceRequestBody) Prediction {
+	if body == nil {
+		return Prediction{}
 	}
 	emb, key, hasPrompt := s.features(body)
-	if hasPrompt {
-		s.key.observe(emb)
+	magnitude, ok := s.hist.predict(key)
+	return Prediction{Magnitude: magnitude, OK: ok, valid: true, emb: emb, key: key, hasPrompt: hasPrompt}
+}
+
+// Learn folds a completed request's output length into the sketch using the
+// features captured at Predict time: it nudges the AdaptiveKey centroids toward the
+// prompt embedding and updates the key's output-length histogram. A zero-value
+// Prediction (nil request body) or a non-positive length is ignored.
+func (s *Sketch) Learn(p Prediction, completionTokens int64) {
+	if !p.valid || completionTokens <= 0 {
+		return
 	}
-	s.hist.observe(key, completionTokens)
+	if p.hasPrompt {
+		s.key.observe(p.emb)
+	}
+	s.hist.observe(p.key, completionTokens)
 }
 
 // features computes the prompt embedding and the histogram key for a request. When

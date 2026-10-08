@@ -21,25 +21,25 @@ import (
 
 	fwkrh "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/requesthandling"
 	fwksched "github.com/llm-d/llm-d-router/pkg/epp/framework/interface/scheduling"
+	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/outlensketch"
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/requestheader/outlenbucket"
 )
 
-// fakeSketch is a scripted sketchModel: it predicts a fixed magnitude (or abstains)
-// and records predict/observe calls.
+// fakeSketch is a scripted sketchModel: it returns a fixed prediction and records
+// predict/learn calls.
 type fakeSketch struct {
-	predict      int64
-	ok           bool
+	predict      outlensketch.Prediction
 	predictCalls int
-	observed     []int64
+	learned      []int64
 }
 
-func (f *fakeSketch) Predict(*fwkrh.InferenceRequestBody) (int64, bool) {
+func (f *fakeSketch) Predict(*fwkrh.InferenceRequestBody) outlensketch.Prediction {
 	f.predictCalls++
-	return f.predict, f.ok
+	return f.predict
 }
 
-func (f *fakeSketch) Observe(_ *fwkrh.InferenceRequestBody, completionTokens int64) {
-	f.observed = append(f.observed, completionTokens)
+func (f *fakeSketch) Learn(_ outlensketch.Prediction, completionTokens int64) {
+	f.learned = append(f.learned, completionTokens)
 }
 
 func newSketchEstimator(t *testing.T, s sketchModel, maxOutput *int64) *SketchTokenEstimator {
@@ -55,17 +55,21 @@ func sketchRequest(id string) *fwksched.InferenceRequest {
 	return &fwksched.InferenceRequest{RequestID: id, Body: &fwkrh.InferenceRequestBody{}}
 }
 
+func pred(magnitude int64, ok bool) outlensketch.Prediction {
+	return outlensketch.Prediction{Magnitude: magnitude, OK: ok}
+}
+
 func TestSketchEstimatorUsesPrediction(t *testing.T) {
-	e := newSketchEstimator(t, &fakeSketch{predict: 3200, ok: true}, nil)
+	e := newSketchEstimator(t, &fakeSketch{predict: pred(3200, true)}, nil)
 	if got := e.EstimateOutputFromRequest(sketchRequest("r1")); got != 3200 {
 		t.Errorf("estimate = %d, want 3200 (sketch prediction)", got)
 	}
 }
 
 func TestSketchEstimatorColdFallsBackToStatic(t *testing.T) {
-	// Cold sketch (ok=false) with a LONG outlen-bucket attribute falls back to the
+	// Cold sketch (OK=false) with a LONG outlen-bucket attribute falls back to the
 	// static long estimate.
-	e := newSketchEstimator(t, &fakeSketch{ok: false}, nil)
+	e := newSketchEstimator(t, &fakeSketch{predict: pred(0, false)}, nil)
 	req := sketchRequest("r1")
 	req.PutAttribute(outlenbucket.AttributeKey, outlenbucket.Long)
 	if got := e.EstimateOutputFromRequest(req); got != LongOutputTokens {
@@ -74,7 +78,7 @@ func TestSketchEstimatorColdFallsBackToStatic(t *testing.T) {
 }
 
 func TestSketchEstimatorCachesPerRequest(t *testing.T) {
-	f := &fakeSketch{predict: 1500, ok: true}
+	f := &fakeSketch{predict: pred(1500, true)}
 	e := newSketchEstimator(t, f, nil)
 	req := sketchRequest("r1")
 	for i := 0; i < 5; i++ {
@@ -90,25 +94,38 @@ func TestSketchEstimatorCachesPerRequest(t *testing.T) {
 	}
 }
 
-func TestSketchEstimatorObserveClearsCache(t *testing.T) {
-	f := &fakeSketch{predict: 1500, ok: true}
+func TestSketchEstimatorObserveReusesCachedPrediction(t *testing.T) {
+	f := &fakeSketch{predict: pred(1500, true)}
 	e := newSketchEstimator(t, f, nil)
 	req := sketchRequest("r1")
-	e.EstimateOutputFromRequest(req)
-	e.Observe(req, 1800)
-	e.EstimateOutputFromRequest(req) // cache cleared -> recompute
-
-	if len(f.observed) != 1 || f.observed[0] != 1800 {
-		t.Errorf("observed = %v, want [1800]", f.observed)
+	e.EstimateOutputFromRequest(req) // predict #1, cached
+	e.Observe(req, 1800)             // reuses the cached prediction -- no new predict
+	if f.predictCalls != 1 {
+		t.Errorf("predict called %d times, want 1 (observe reused the cache)", f.predictCalls)
 	}
+	if len(f.learned) != 1 || f.learned[0] != 1800 {
+		t.Errorf("learned = %v, want [1800]", f.learned)
+	}
+	// The entry was dropped, so a later estimate recomputes.
+	e.EstimateOutputFromRequest(req)
 	if f.predictCalls != 2 {
-		t.Errorf("predict called %d times, want 2 (observe cleared the cache)", f.predictCalls)
+		t.Errorf("predict called %d times, want 2 (cache cleared at observe)", f.predictCalls)
+	}
+}
+
+func TestSketchEstimatorObserveRecomputesOnCacheMiss(t *testing.T) {
+	// A request observed without a prior cached prediction (e.g. evicted) recomputes.
+	f := &fakeSketch{predict: pred(1500, true)}
+	e := newSketchEstimator(t, f, nil)
+	e.Observe(sketchRequest("r1"), 900)
+	if f.predictCalls != 1 || len(f.learned) != 1 || f.learned[0] != 900 {
+		t.Errorf("cache-miss observe: predictCalls=%d learned=%v, want 1 and [900]", f.predictCalls, f.learned)
 	}
 }
 
 func TestSketchEstimatorClampsPrediction(t *testing.T) {
 	cap := int64(500)
-	e := newSketchEstimator(t, &fakeSketch{predict: 9000, ok: true}, &cap)
+	e := newSketchEstimator(t, &fakeSketch{predict: pred(9000, true)}, &cap)
 	if got := e.EstimateOutputFromRequest(sketchRequest("r1")); got != 500 {
 		t.Errorf("estimate = %d, want 500 (operator cap)", got)
 	}

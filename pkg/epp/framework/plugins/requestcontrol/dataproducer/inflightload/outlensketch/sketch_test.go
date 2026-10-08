@@ -70,7 +70,7 @@ func TestConfigValidation(t *testing.T) {
 
 func TestSketchColdAbstains(t *testing.T) {
 	s := newTestSketch(t)
-	if _, ok := s.Predict(userReq("solve problem")); ok {
+	if s.Predict(userReq("solve problem")).OK {
 		t.Error("a cold sketch must abstain")
 	}
 }
@@ -81,26 +81,26 @@ func TestSketchLearnsMagnitude(t *testing.T) {
 
 	// Feed a consistent short workload for this signal signature.
 	for i := 0; i < 10; i++ {
-		s.Observe(req, 120) // S
+		s.Learn(s.Predict(req), 120) // S
 	}
-	mag, ok := s.Predict(req)
-	if !ok {
+	pred := s.Predict(req)
+	if !pred.OK {
 		t.Fatal("sketch should predict after warmup observations")
 	}
-	if mag != binMidpoints[0] {
-		t.Errorf("learned magnitude = %d, want %d (S midpoint)", mag, binMidpoints[0])
+	if pred.Magnitude != binMidpoints[0] {
+		t.Errorf("learned magnitude = %d, want %d (S midpoint)", pred.Magnitude, binMidpoints[0])
 	}
 }
 
 func TestSketchNilAndEmptyInputs(t *testing.T) {
 	s := newTestSketch(t)
-	if _, ok := s.Predict(nil); ok {
+	if s.Predict(nil).OK {
 		t.Error("nil body must abstain")
 	}
-	// Non-positive and nil observations are ignored (no panic, no learning).
-	s.Observe(nil, 100)
-	s.Observe(userReq("solve problem"), 0)
-	if _, ok := s.Predict(userReq("solve problem")); ok {
+	// A nil-body prediction and a non-positive length are ignored (no panic, no learning).
+	s.Learn(s.Predict(nil), 100)
+	s.Learn(s.Predict(userReq("solve problem")), 0)
+	if s.Predict(userReq("solve problem")).OK {
 		t.Error("ignored observations must not warm a key")
 	}
 }

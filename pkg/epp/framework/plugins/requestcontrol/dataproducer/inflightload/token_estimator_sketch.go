@@ -24,11 +24,12 @@ import (
 	"github.com/llm-d/llm-d-router/pkg/epp/framework/plugins/requestcontrol/dataproducer/inflightload/outlensketch"
 )
 
-// sketchPredictionCacheSize bounds the per-request prediction cache. A request's
-// output estimate is endpoint-independent but EstimateOutputFromRequest is called
-// once per candidate endpoint, so the first call per request is cached and the rest
-// read it back. The bound keeps memory flat if an entry is never explicitly removed
-// (e.g. a request that ends without an end-of-stream).
+// sketchPredictionCacheSize bounds the per-request prediction cache. The first
+// EstimateOutputFromRequest call per request embeds the prompt and caches the
+// prediction (which carries the embedding); later per-endpoint calls and the
+// end-of-stream Observe reuse it, so the prompt is embedded once per request. The
+// LRU bound keeps memory flat (each entry holds one embedding) when an entry is
+// never explicitly removed, e.g. a request that ends without an end-of-stream.
 const sketchPredictionCacheSize = 8192
 
 // OutputObserver is an optional TokenEstimator capability: a learning estimator
@@ -43,11 +44,20 @@ type OutputObserver interface {
 // *outlensketch.Sketch is the production implementation; the seam keeps the
 // estimator's caching and fallback logic testable without the embedding asset.
 type sketchModel interface {
-	Predict(body *fwkrh.InferenceRequestBody) (magnitude int64, ok bool)
-	Observe(body *fwkrh.InferenceRequestBody, completionTokens int64)
+	Predict(body *fwkrh.InferenceRequestBody) outlensketch.Prediction
+	Learn(prediction outlensketch.Prediction, completionTokens int64)
 }
 
 var _ sketchModel = (*outlensketch.Sketch)(nil)
+
+// cachedPrediction holds a request's featurized prediction and its clamped output
+// estimate. The prediction (which carries the prompt embedding) is reused at
+// end-of-stream so the prompt is windowed and embedded once per request, not again
+// per candidate endpoint nor again to learn.
+type cachedPrediction struct {
+	prediction outlensketch.Prediction
+	output     int64
+}
 
 // SketchTokenEstimator estimates output tokens from the learned output-length
 // sketch (outlensketch): a more precise, self-adapting alternative to the static
@@ -56,7 +66,7 @@ var _ sketchModel = (*outlensketch.Sketch)(nil)
 type SketchTokenEstimator struct {
 	*SimpleTokenEstimator
 	sketch sketchModel
-	cache  *lru.Cache[string, int64]
+	cache  *lru.Cache[string, cachedPrediction]
 }
 
 var (
@@ -67,7 +77,7 @@ var (
 // NewSketchTokenEstimator returns a SketchTokenEstimator over the given sketch, with
 // an optional operator cap on the estimated output tokens.
 func NewSketchTokenEstimator(sketch sketchModel, maxOutput *int64) (*SketchTokenEstimator, error) {
-	cache, err := lru.New[string, int64](sketchPredictionCacheSize)
+	cache, err := lru.New[string, cachedPrediction](sketchPredictionCacheSize)
 	if err != nil {
 		return nil, err
 	}
@@ -79,41 +89,57 @@ func NewSketchTokenEstimator(sketch sketchModel, maxOutput *int64) (*SketchToken
 }
 
 // EstimateOutputFromRequest returns the sketch's output-token estimate for the
-// request, cached per request id so repeated per-endpoint calls embed the prompt
-// once. A cold key falls back to the static signal-rule estimate, so the estimator
-// is usable from the first request and self-heals as keys warm up.
+// request, cached per request id so repeated per-endpoint calls (and the
+// end-of-stream Observe) reuse one embedding. A cold key falls back to the static
+// signal-rule estimate, so the estimator is usable from the first request and
+// self-heals as keys warm up.
 func (e *SketchTokenEstimator) EstimateOutputFromRequest(request *fwksched.InferenceRequest) int64 {
 	if request == nil || request.Body == nil {
 		return 0
 	}
 	if request.RequestID != "" {
 		if cached, ok := e.cache.Get(request.RequestID); ok {
-			return cached
+			return cached.output
 		}
 	}
-	est := e.estimateOutput(request)
+	prediction := e.sketch.Predict(request.Body)
+	output := e.outputFor(request, prediction)
 	if request.RequestID != "" {
-		e.cache.Add(request.RequestID, est)
+		e.cache.Add(request.RequestID, cachedPrediction{prediction: prediction, output: output})
 	}
-	return est
+	return output
 }
 
-func (e *SketchTokenEstimator) estimateOutput(request *fwksched.InferenceRequest) int64 {
-	if magnitude, ok := e.sketch.Predict(request.Body); ok {
-		return e.clampOutput(magnitude, request.Body.MaxOutputTokens)
+// outputFor maps a prediction to a clamped output estimate, falling back to the
+// static signal-rule estimate when the key is cold.
+func (e *SketchTokenEstimator) outputFor(request *fwksched.InferenceRequest, prediction outlensketch.Prediction) int64 {
+	if prediction.OK {
+		return e.clampOutput(prediction.Magnitude, request.Body.MaxOutputTokens)
 	}
-	// Cold key: defer to the static signal-rule estimate (already clamped).
 	return e.SimpleTokenEstimator.EstimateOutputFromRequest(request)
 }
 
-// Observe folds the observed output length into the sketch at end-of-stream and
-// drops the request's cached prediction.
+// Observe folds the observed output length into the sketch at end-of-stream, reusing
+// the prediction cached at scheduling time (recomputing it only on a cache miss),
+// and drops the cache entry.
 func (e *SketchTokenEstimator) Observe(request *fwksched.InferenceRequest, completionTokens int64) {
 	if request == nil || request.Body == nil {
 		return
 	}
-	e.sketch.Observe(request.Body, completionTokens)
+	prediction, ok := e.lookupPrediction(request)
+	if !ok {
+		prediction = e.sketch.Predict(request.Body)
+	}
+	e.sketch.Learn(prediction, completionTokens)
 	if request.RequestID != "" {
 		e.cache.Remove(request.RequestID)
 	}
+}
+
+func (e *SketchTokenEstimator) lookupPrediction(request *fwksched.InferenceRequest) (outlensketch.Prediction, bool) {
+	if request.RequestID == "" {
+		return outlensketch.Prediction{}, false
+	}
+	cached, ok := e.cache.Get(request.RequestID)
+	return cached.prediction, ok
 }
