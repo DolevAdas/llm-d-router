@@ -116,12 +116,13 @@ func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
 	if size > math.MaxInt64 {
 		return nil, fmt.Errorf("%s: %q exceeds the maximum budget", ParamForceStreamBufferSize, sizeStr)
 	}
+	budgetMax := int64(size)
 
-	perRequest, err := parseForceStreamPerRequest(params, size)
+	perRequest, err := parseForceStreamPerRequest(params, budgetMax)
 	if err != nil {
 		return nil, err
 	}
-	return newForceStreamBudget(int64(size), perRequest), nil
+	return newForceStreamBudget(budgetMax, perRequest), nil
 }
 
 // parseForceStreamPerRequest reads force_stream_max_request_size into the
@@ -130,14 +131,14 @@ func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
 // a large share of the budget without the operator opting in. An explicit value
 // must be in (0, max]: a cap above the shared budget could never bind, so it fails
 // config load rather than clamping silently.
-func parseForceStreamPerRequest(params map[string]any, budgetMax uint64) (int64, error) {
+func parseForceStreamPerRequest(params map[string]any, budgetMax int64) (int64, error) {
 	sizeStr, err := paramString(params, ParamForceStreamMaxRequestSize)
 	if err != nil {
 		return 0, err
 	}
 	if sizeStr == "" {
-		if budgetMax < uint64(defaultForceStreamMaxRequestBytes) {
-			return int64(budgetMax), nil
+		if budgetMax < defaultForceStreamMaxRequestBytes {
+			return budgetMax, nil
 		}
 		return defaultForceStreamMaxRequestBytes, nil
 	}
@@ -148,10 +149,14 @@ func parseForceStreamPerRequest(params map[string]any, budgetMax uint64) (int64,
 	if size == 0 {
 		return 0, fmt.Errorf("%s: must be greater than zero", ParamForceStreamMaxRequestSize)
 	}
-	if size > budgetMax {
+	if size > math.MaxInt64 {
+		return 0, fmt.Errorf("%s: %q exceeds the maximum budget", ParamForceStreamMaxRequestSize, sizeStr)
+	}
+	perRequest := int64(size)
+	if perRequest > budgetMax {
 		return 0, fmt.Errorf("%s: %q exceeds %s", ParamForceStreamMaxRequestSize, sizeStr, ParamForceStreamBufferSize)
 	}
-	return int64(size), nil
+	return perRequest, nil
 }
 
 // estimateReservation sizes the buffer one forced request may hold and reports
