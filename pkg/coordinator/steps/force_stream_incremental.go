@@ -91,7 +91,7 @@ func (s *DecodeStep) executeForceStreamIncremental(ctx context.Context, logger l
 // incrementally. It omits Content-Length so net/http uses chunked encoding, and
 // clears the write deadline for the slow-client drain.
 func streamForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, body io.Reader, shape sseShape) error {
-	em := newIncrementalEmitter(reqCtx.ResponseWriter, shape)
+	em := newIncrementalEmitter(reqCtx.ResponseWriter, shape, reqCtx.Model)
 	em.clearWriteDeadline()
 
 	scanner := bufio.NewScanner(body)
@@ -123,9 +123,10 @@ func streamForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, b
 // content byte, then writes the JSON prefix, streams each escaped content delta,
 // and writes the suffix (finish_reason, usage) once the stream ends.
 type incrementalEmitter struct {
-	w     http.ResponseWriter
-	rc    *http.ResponseController
-	shape sseShape
+	w        http.ResponseWriter
+	rc       *http.ResponseController
+	shape    sseShape
+	reqModel string
 
 	started bool
 
@@ -142,8 +143,8 @@ type incrementalEmitter struct {
 	usage        map[string]any
 }
 
-func newIncrementalEmitter(w http.ResponseWriter, shape sseShape) *incrementalEmitter {
-	return &incrementalEmitter{w: w, rc: http.NewResponseController(w), shape: shape}
+func newIncrementalEmitter(w http.ResponseWriter, shape sseShape, model string) *incrementalEmitter {
+	return &incrementalEmitter{w: w, rc: http.NewResponseController(w), shape: shape, reqModel: model}
 }
 
 // clearWriteDeadline disables the server write timeout for this response so a
@@ -286,7 +287,7 @@ func (e *incrementalEmitter) finish(logger logr.Logger) error {
 		return nil
 	}
 	_ = e.rc.Flush()
-	coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultForced)
+	coordmetrics.IncForceStreamTotal(e.reqModel, coordmetrics.ForceStreamResultForced)
 	logger.V(logutil.DEFAULT).Info("force-stream complete (incremental)")
 	return nil
 }

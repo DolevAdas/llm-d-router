@@ -114,8 +114,8 @@ func SubForceStreamBufferedBytes(n int64) {
 	forceStreamBufferedBytes.WithLabelValues().Sub(float64(n))
 }
 
-// IncForceStreamTotal increments force_stream_total for one candidate outcome.
-// The outcome label values are the ForceStreamResult* constants.
-func IncForceStreamTotal(result string) {
-	forceStreamTotal.WithLabelValues(result).Inc()
+// IncForceStreamTotal increments force_stream_total for one model's candidate
+// outcome. The outcome label values are the ForceStreamResult* constants.
+func IncForceStreamTotal(modelName, result string) {
+	forceStreamTotal.WithLabelValues(boundModel(modelName), result).Inc()
 }

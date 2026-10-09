@@ -67,16 +67,23 @@ const (
 	statusCompleted              = "completed"
 )
 
-func shapeForAPIType(apiType reqcommon.APIType) sseShape {
+// shapeForAPIType maps the API a request used to the reassembly shape its stream
+// folds into. ok is false for an API the force-stream path does not handle; the
+// caller then declines to force-stream rather than misparsing the stream as text.
+// The decode step rejects such APIs earlier, so this guards against that gate
+// loosening without this switch following.
+func shapeForAPIType(apiType reqcommon.APIType) (sseShape, bool) {
 	switch apiType {
 	case reqcommon.APITypeChatCompletions:
-		return sseShapeChat
+		return sseShapeChat, true
+	case reqcommon.APITypeCompletions:
+		return sseShapeText, true
 	case reqcommon.APITypeVLLMGenerate:
-		return sseShapeGenerate
+		return sseShapeGenerate, true
 	case reqcommon.APITypeResponses:
-		return sseShapeResponses
+		return sseShapeResponses, true
 	default:
-		return sseShapeText
+		return 0, false
 	}
 }
 
@@ -105,6 +112,10 @@ type sseChoice struct {
 // forceStreamLossy), so such a reply takes the pass-through instead.
 type sseReassembler struct {
 	shape sseShape
+	// maxChoices caps how many choice indices fold, matching the client's declared
+	// n so an upstream reporting more choices than reserved cannot grow memory past
+	// the reservation. Zero means no cap.
+	maxChoices int
 
 	id                string
 	model             string
@@ -126,8 +137,8 @@ type sseReassembler struct {
 	contentBytes int64
 }
 
-func newSSEReassembler(shape sseShape) *sseReassembler {
-	return &sseReassembler{shape: shape, choices: map[int]*sseChoice{}}
+func newSSEReassembler(shape sseShape, maxChoices int) *sseReassembler {
+	return &sseReassembler{shape: shape, maxChoices: maxChoices, choices: map[int]*sseChoice{}}
 }
 
 // add folds one parsed SSE data frame. Frames with no choices (the trailing
@@ -259,11 +270,15 @@ func (r *sseReassembler) choice(index int) *sseChoice {
 
 // foldChoice appends one streamed choice fragment to its accumulator. The index
 // defaults to 0 so a single-choice stream that omits it still folds into one
-// choice.
+// choice. An index at or beyond the declared n is dropped, so an upstream
+// returning more choices than reserved cannot grow memory past the reservation.
 func (r *sseReassembler) foldChoice(choice map[string]any) {
 	index := 0
 	if n, ok := numField(choice["index"]); ok {
 		index = n
+	}
+	if r.maxChoices > 0 && index >= r.maxChoices {
+		return
 	}
 	acc := r.choice(index)
 

@@ -75,6 +75,11 @@ func TestForceStreamLossy(t *testing.T) {
 	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"functions": []any{map[string]any{"name": "f"}}}))
 	require.True(t, forceStreamLossy(sseShapeChat, map[string]any{"logprobs": true}))
 	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": 3}))
+	// On the legacy Completions API logprobs is a count; its presence (even 0)
+	// requests the sampled token's logprob, which the reassembler drops, so a
+	// numeric value of any size is lossy. JSON decodes the count to float64.
+	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": 0}))
+	require.True(t, forceStreamLossy(sseShapeText, map[string]any{"logprobs": float64(0)}))
 
 	// Absent, empty, or false forms are not lossy.
 	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{}))
@@ -110,7 +115,7 @@ func TestForceStreamIncremental_EqualsBuffered(t *testing.T) {
 	// Compare both in the form the client receives (JSON-serialized), since the
 	// buffered path also marshals its result before sending; a direct map compare
 	// would differ only by numeric type (int vs JSON float64).
-	want := newSSEReassembler(sseShapeChat)
+	want := newSSEReassembler(sseShapeChat, 0)
 	for _, f := range frames {
 		want.add(frame(t, f))
 	}

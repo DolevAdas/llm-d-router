@@ -35,7 +35,7 @@ func frame(t *testing.T, payload string) map[string]any {
 }
 
 func TestSSEReassemble_Chat(t *testing.T) {
-	r := newSSEReassembler(sseShapeChat)
+	r := newSSEReassembler(sseShapeChat, 0)
 	r.add(frame(t, `{"id":"cmpl-1","object":"chat.completion.chunk","created":100,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"He"},"finish_reason":null}]}`))
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{"content":"llo"},"finish_reason":null}]}`))
 	r.add(frame(t, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`))
@@ -63,7 +63,7 @@ func TestSSEReassemble_Chat(t *testing.T) {
 }
 
 func TestSSEReassemble_Text(t *testing.T) {
-	r := newSSEReassembler(sseShapeText)
+	r := newSSEReassembler(sseShapeText, 0)
 	r.add(frame(t, `{"id":"cmpl-2","object":"text_completion","created":200,"model":"m","choices":[{"index":0,"text":"He","finish_reason":null}]}`))
 	r.add(frame(t, `{"choices":[{"index":0,"text":"llo","finish_reason":"length"}]}`))
 	r.add(frame(t, `{"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`))
@@ -86,13 +86,13 @@ func TestSSEReassemble_Text(t *testing.T) {
 // The text shape has no chunk-vs-final object rename, so an object the stream
 // never carried defaults rather than coming through empty.
 func TestSSEReassemble_TextDefaultsObject(t *testing.T) {
-	r := newSSEReassembler(sseShapeText)
+	r := newSSEReassembler(sseShapeText, 0)
 	r.add(frame(t, `{"id":"g-1","choices":[{"index":0,"text":"hi"}]}`))
 	require.Equal(t, "text_completion", r.result()["object"])
 }
 
 func TestSSEReassemble_MultipleChoices(t *testing.T) {
-	r := newSSEReassembler(sseShapeChat)
+	r := newSSEReassembler(sseShapeChat, 0)
 	r.add(frame(t, `{"id":"c","object":"chat.completion.chunk","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"A"}},{"index":1,"delta":{"role":"assistant","content":"B"}}]}`))
 	r.add(frame(t, `{"choices":[{"index":1,"delta":{"content":"b"},"finish_reason":"stop"},{"index":0,"delta":{"content":"a"},"finish_reason":"stop"}]}`))
 
@@ -112,7 +112,7 @@ func TestSSEReassemble_MultipleChoices(t *testing.T) {
 // Choices must come out ordered by index regardless of the order the frames
 // first mentioned them.
 func TestSSEReassemble_ChoiceOrder(t *testing.T) {
-	r := newSSEReassembler(sseShapeText)
+	r := newSSEReassembler(sseShapeText, 0)
 	r.add(frame(t, `{"choices":[{"index":2,"text":"c"},{"index":0,"text":"a"}]}`))
 	r.add(frame(t, `{"choices":[{"index":1,"text":"b"}]}`))
 
@@ -124,7 +124,7 @@ func TestSSEReassemble_ChoiceOrder(t *testing.T) {
 }
 
 func TestSSEReassemble_BufferedBytesTracksContent(t *testing.T) {
-	r := newSSEReassembler(sseShapeText)
+	r := newSSEReassembler(sseShapeText, 0)
 	require.Zero(t, r.bufferedBytes())
 	r.add(frame(t, `{"choices":[{"index":0,"text":"hello"}]}`))
 	require.EqualValues(t, 5, r.bufferedBytes())
@@ -133,10 +133,39 @@ func TestSSEReassemble_BufferedBytesTracksContent(t *testing.T) {
 }
 
 func TestShapeForAPIType(t *testing.T) {
-	require.Equal(t, sseShapeChat, shapeForAPIType(reqcommon.APITypeChatCompletions))
-	require.Equal(t, sseShapeText, shapeForAPIType(reqcommon.APITypeCompletions))
-	require.Equal(t, sseShapeGenerate, shapeForAPIType(reqcommon.APITypeVLLMGenerate))
-	require.Equal(t, sseShapeResponses, shapeForAPIType(reqcommon.APITypeResponses))
+	for _, tc := range []struct {
+		apiType reqcommon.APIType
+		want    sseShape
+	}{
+		{reqcommon.APITypeChatCompletions, sseShapeChat},
+		{reqcommon.APITypeCompletions, sseShapeText},
+		{reqcommon.APITypeVLLMGenerate, sseShapeGenerate},
+		{reqcommon.APITypeResponses, sseShapeResponses},
+	} {
+		got, ok := shapeForAPIType(tc.apiType)
+		require.True(t, ok)
+		require.Equal(t, tc.want, got)
+	}
+
+	// An API the force-stream path does not handle reports ok=false, so the caller
+	// declines to force-stream rather than misparsing the stream as text.
+	_, ok := shapeForAPIType(reqcommon.APITypeMessages)
+	require.False(t, ok)
+}
+
+// TestSSEReassemble_DropsChoicesBeyondN verifies the reassembler ignores a choice
+// whose index is at or beyond the declared n, so an upstream returning more
+// choices than reserved cannot grow memory past the reservation.
+func TestSSEReassemble_DropsChoicesBeyondN(t *testing.T) {
+	r := newSSEReassembler(sseShapeText, 1)
+	r.add(frame(t, `{"choices":[{"index":0,"text":"keep"},{"index":5,"text":"drop"}]}`))
+
+	choices := r.result()["choices"].([]any)
+	require.Len(t, choices, 1)
+	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
+	require.Equal(t, "keep", choices[0].(map[string]any)["text"])
+	// The dropped choice's content is not charged to the ceiling.
+	require.EqualValues(t, len("keep"), r.bufferedBytes())
 }
 
 // The Responses stream is typed events; response.completed carries the terminal
@@ -146,7 +175,7 @@ func TestShapeForAPIType(t *testing.T) {
 func TestSSEReassemble_Responses(t *testing.T) {
 	completed := `{"id":"resp-1","object":"response","model":"llama-3","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello world"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}`
 
-	r := newSSEReassembler(sseShapeResponses)
+	r := newSSEReassembler(sseShapeResponses, 0)
 	r.add(frame(t, `{"type":"response.created","response":{"id":"resp-1","model":"llama-3","status":"in_progress"}}`))
 	r.add(frame(t, `{"type":"response.output_text.delta","delta":"Hello"}`))
 	r.add(frame(t, `{"type":"response.output_text.delta","delta":" world"}`))
@@ -163,7 +192,7 @@ func TestSSEReassemble_Responses(t *testing.T) {
 // Without a response.completed event, a minimal response object is assembled
 // from the accumulated deltas so the client still gets a well-formed reply.
 func TestSSEReassemble_ResponsesNoCompleted(t *testing.T) {
-	r := newSSEReassembler(sseShapeResponses)
+	r := newSSEReassembler(sseShapeResponses, 0)
 	r.add(frame(t, `{"type":"response.created","response":{"id":"resp-2","model":"m","status":"in_progress"}}`))
 	r.add(frame(t, `{"type":"response.output_text.delta","delta":"hi"}`))
 
@@ -190,7 +219,7 @@ func TestSSEReassemble_ResponsesNoCompleted(t *testing.T) {
 // request_id envelope with prompt_logprobs and kv_transfer_params null, per
 // choice only {index, logprobs, finish_reason, token_ids}, and no usage block.
 func TestSSEReassemble_Generate(t *testing.T) {
-	r := newSSEReassembler(sseShapeGenerate)
+	r := newSSEReassembler(sseShapeGenerate, 0)
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[576]}],"usage":null}`))
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[{"index":0,"logprobs":null,"finish_reason":null,"token_ids":[9396]}],"usage":null}`))
 	r.add(frame(t, `{"request_id":"generate-tokens-abc","choices":[{"index":0,"logprobs":null,"finish_reason":"length","token_ids":[374]}],"usage":null}`))
@@ -224,14 +253,14 @@ func TestSSEReassemble_Generate(t *testing.T) {
 // A choice that carried no tokens still emits token_ids as an array, matching
 // the documented generate reply shape rather than a null.
 func TestSSEReassemble_GenerateEmptyTokens(t *testing.T) {
-	r := newSSEReassembler(sseShapeGenerate)
+	r := newSSEReassembler(sseShapeGenerate, 0)
 	r.add(frame(t, `{"request_id":"g","choices":[{"index":0,"finish_reason":"stop"}]}`))
 	choice := r.result()["choices"].([]any)[0].(map[string]any)
 	require.Equal(t, []any{}, choice["token_ids"])
 }
 
 func TestSSEReassemble_GenerateBufferedBytesCountsTokens(t *testing.T) {
-	r := newSSEReassembler(sseShapeGenerate)
+	r := newSSEReassembler(sseShapeGenerate, 0)
 	require.Zero(t, r.bufferedBytes())
 	r.add(frame(t, `{"request_id":"g","choices":[{"index":0,"token_ids":[1,2,3]}]}`))
 	require.EqualValues(t, 3*forceStreamBytesPerToken, r.bufferedBytes())

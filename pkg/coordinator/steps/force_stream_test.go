@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
@@ -72,9 +73,13 @@ func newForceStreamStep(t *testing.T, serverURL, bufferSize string) (*DecodeStep
 	coordmetrics.Reset()
 
 	gwClient := gateway.New(config.GatewayConfig{Address: serverURL})
+	// Pin the per-request cap to the whole budget so these tests exercise budget
+	// and ceiling behavior with a single request free to reserve all of it; the
+	// default cap (a quarter of the budget) is covered separately.
 	step, err := NewDecodeStep(gwClient, map[string]any{
-		ParamForceStream:           true,
-		ParamForceStreamBufferSize: bufferSize,
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     bufferSize,
+		ParamForceStreamMaxRequestSize: bufferSize,
 	})
 	require.NoError(t, err)
 	return step.(*DecodeStep), reg
@@ -83,6 +88,29 @@ func newForceStreamStep(t *testing.T, serverURL, bufferSize string) (*DecodeStep
 func forceStreamCount(t *testing.T, reg *prometheus.Registry, result string) float64 {
 	t.Helper()
 	return gatherLabeled(t, reg, "llm_d_coordinator_force_stream_total", "result", result)
+}
+
+// forceStreamCountModel reads force_stream_total for one (model_name, result)
+// pair, so a test can assert the counter is scoped by model.
+func forceStreamCountModel(t *testing.T, reg *prometheus.Registry, model, result string) float64 {
+	t.Helper()
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	for _, mf := range mfs {
+		if mf.GetName() != "llm_d_coordinator_force_stream_total" {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			labels := map[string]string{}
+			for _, l := range m.GetLabel() {
+				labels[l.GetName()] = l.GetValue()
+			}
+			if labels["model_name"] == model && labels["result"] == result {
+				return m.GetCounter().GetValue()
+			}
+		}
+	}
+	return 0
 }
 
 func forceStreamGauge(t *testing.T, reg *prometheus.Registry) float64 {
@@ -135,6 +163,149 @@ func TestForceStream_ParamsOptional(t *testing.T) {
 	require.True(t, ds.forceStream)
 	require.NotNil(t, ds.budget, "force_stream on without a buffer size uses the default budget")
 	require.Equal(t, int64(1<<30), ds.budget.max, "the default buffer budget is 1GiB")
+	require.Equal(t, int64(256<<10), ds.budget.perRequestMax, "the default per-request cap is 256KiB")
+}
+
+// TestForceStream_BudgetConfigErrors verifies that a malformed buffer-size or
+// per-request-size value fails config load rather than running a silent default.
+func TestForceStream_BudgetConfigErrors(t *testing.T) {
+	gwClient := gateway.New(config.GatewayConfig{})
+	cases := []struct {
+		name   string
+		params map[string]any
+	}{
+		{"zero buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "0"}},
+		{"negative buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "-1GiB"}},
+		{"non-numeric buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "abc"}},
+		{"zero per-request", map[string]any{ParamForceStream: true, ParamForceStreamMaxRequestSize: "0"}},
+		{"non-numeric per-request", map[string]any{ParamForceStream: true, ParamForceStreamMaxRequestSize: "nope"}},
+		{"per-request exceeds buffer", map[string]any{ParamForceStream: true, ParamForceStreamBufferSize: "1GiB", ParamForceStreamMaxRequestSize: "2GiB"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewDecodeStep(gwClient, tc.params)
+			require.Error(t, err)
+		})
+	}
+}
+
+// TestForceStream_PerRequestCap_FallsBack verifies a request whose estimate
+// exceeds the per-request cap takes the pass-through even when the shared budget
+// is far larger, so one large request cannot claim the whole budget.
+func TestForceStream_PerRequestCap_FallsBack(t *testing.T) {
+	var upstreamBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &upstreamBody)
+		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]any{"content": "ok"}}}})
+	}))
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "4KiB",
+	})
+	require.NoError(t, err)
+
+	// A generate request whose max_tokens would reserve far more than the 4KiB
+	// per-request cap: it is bounded but too large, so it falls back rather than
+	// claiming a large share of the 1GiB budget.
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-big",
+		OriginalPath:     reqcommon.PathVLLMGenerate,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1, 2, 3},
+			"sampling_params": map[string]any{"max_tokens": 100000},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+
+	require.Equal(t, false, upstreamBody["stream"], "a request over the per-request cap must pass through unchanged")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnbounded), 1e-9)
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+}
+
+// TestForceStream_OversizedFrame_CeilingAbort verifies that a single SSE frame
+// larger than the request's reservation trips the scanner's buffer limit and is
+// reported as a ceiling abort (counted and clean), not a generic read error.
+func TestForceStream_OversizedFrame_CeilingAbort(t *testing.T) {
+	var big strings.Builder
+	big.WriteString(`{"request_id":"g","choices":[{"index":0,"token_ids":[`)
+	for i := 0; i < 2000; i++ {
+		if i > 0 {
+			big.WriteByte(',')
+		}
+		big.WriteString("12345")
+	}
+	big.WriteString(`]}]}`)
+	server := sseServer(t, []string{big.String()}, nil)
+	defer server.Close()
+
+	// A 4KiB budget reserves roughly 2.3KiB for a max_tokens=1 generate request, so
+	// the single ~12KB frame overflows the scanner buffer sized to that reservation.
+	step, reg := newForceStreamStep(t, server.URL, "4KiB")
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-bigframe",
+		OriginalPath:     reqcommon.PathVLLMGenerate,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1},
+			"sampling_params": map[string]any{"max_tokens": 1},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	require.ErrorIs(t, err, errForceStreamCeiling)
+	require.Equal(t, 0, recorder.Body.Len(), "nothing may be written to the client when the frame overflows")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorCeiling), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation must be released after an abort")
+}
+
+// TestForceStream_TotalCarriesModelLabel verifies force_stream_total is scoped by
+// model, so budget-exhaustion fallbacks can be attributed to a model's traffic.
+func TestForceStream_TotalCarriesModelLabel(t *testing.T) {
+	frames := []string{
+		`{"id":"c-1","model":"llama-3","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c-1","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+	}
+	server := sseServer(t, frames, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-model",
+		OriginalPath:     reqcommon.PathChatCompletions,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	require.InDelta(t, 1.0, forceStreamCountModel(t, reg, "llama-3", coordmetrics.ForceStreamResultForced), 1e-9)
 }
 
 func TestForceStream_Chat_ReassemblesToJSON(t *testing.T) {
@@ -643,6 +814,42 @@ func TestForceStream_CeilingAbort(t *testing.T) {
 
 	require.Equal(t, 0, recorder.Body.Len(), "nothing may be written to the client when the ceiling trips")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorCeiling), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation must be released after an abort")
+}
+
+// TestForceStream_MalformedFrame_BufferedPath verifies that an unparsable SSE
+// frame on the buffered path aborts cleanly: nothing is buffered to the client, a
+// plain error surfaces for a 5xx, and no forced outcome is recorded. Generate
+// takes the buffered path, where the whole reply is read before any write.
+func TestForceStream_MalformedFrame_BufferedPath(t *testing.T) {
+	server := sseServer(t, []string{`not-json`}, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:        "req-badframe",
+		OriginalPath:     reqcommon.PathVLLMGenerate,
+		Model:            "llama-3",
+		Stream:           false,
+		KVTransferParams: map[string]any{},
+		Body: map[string]any{
+			"model": "llama-3", "stream": false,
+			"token_ids":       []any{1},
+			"sampling_params": map[string]any{"max_tokens": 8},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err := step.Execute(context.Background(), reqCtx)
+	require.Error(t, err, "a malformed frame on the buffered path must surface before any write")
+	var streamed *pipeline.UpstreamStreamedError
+	require.False(t, errors.As(err, &streamed), "nothing was written, so it is a plain error for a clean 5xx")
+	require.NotErrorIs(t, err, errForceStreamCeiling, "a parse failure is not a ceiling abort")
+
+	require.Equal(t, 0, recorder.Body.Len(), "nothing may be written to the client on a parse failure")
+	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation must be released after an abort")
 }
 

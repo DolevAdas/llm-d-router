@@ -78,8 +78,9 @@ const (
 // Result label values for force_stream_total, one per candidate outcome. Forced
 // is a request the coordinator streamed from the upstream and reassembled into
 // one non-streaming response. FallbackBudget could have been forced but found
-// the buffer budget full. FallbackUnbounded is a buffered-shape request with no
-// output token limit, which cannot be reserved. FallbackUnsupported is a chat or
+// the buffer budget full. FallbackUnbounded is a buffered-shape request that
+// cannot be reserved: it declares no output token limit, or the limit it declares
+// would reserve more than the per-request cap allows. FallbackUnsupported is a chat or
 // text request whose reply may carry fields the reassembler drops (tool or
 // function calls, logprobs). ErrorCeiling is a forced request whose reassembled
 // response exceeded its reserved budget and was aborted before any bytes reached

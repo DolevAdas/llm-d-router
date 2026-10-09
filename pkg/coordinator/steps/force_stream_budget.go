@@ -30,10 +30,13 @@ import (
 type forceStreamBudget struct {
 	current atomic.Int64
 	max     int64
+	// perRequestMax caps a single request's reservation, so one large request
+	// cannot claim the whole budget and starve concurrent candidates.
+	perRequestMax int64
 }
 
-func newForceStreamBudget(maxBytes int64) *forceStreamBudget {
-	return &forceStreamBudget{max: maxBytes}
+func newForceStreamBudget(maxBytes, perRequestMax int64) *forceStreamBudget {
+	return &forceStreamBudget{max: maxBytes, perRequestMax: perRequestMax}
 }
 
 // tryReserve adds n to the live total if it stays within max, reporting whether

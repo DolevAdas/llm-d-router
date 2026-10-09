@@ -88,21 +88,22 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 	// one with no output token limit to reserve, or one that finds the budget
 	// full, falls through to the pass-through below, which buffers nothing.
 	if s.forceStream && !reqCtx.Stream {
-		shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
-		switch {
-		case forceStreamLossy(shape, reqCtx.Body):
-			coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackUnsupported)
-		case canStreamIncrementally(shape, reqCtx):
-			return s.executeForceStreamIncremental(ctx, logger, reqCtx, shape)
-		default:
-			reserved, ok := s.estimateReservation(reqCtx)
+		if shape, shapeOK := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath)); shapeOK {
 			switch {
-			case !ok:
-				coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackUnbounded)
-			case s.budget.tryReserve(reserved):
-				return s.executeForceStream(ctx, logger, reqCtx, reserved)
+			case forceStreamLossy(shape, reqCtx.Body):
+				coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnsupported)
+			case canStreamIncrementally(shape, reqCtx):
+				return s.executeForceStreamIncremental(ctx, logger, reqCtx, shape)
 			default:
-				coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultFallbackBudget)
+				reserved, ok := s.estimateReservation(reqCtx)
+				switch {
+				case !ok:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackUnbounded)
+				case s.budget.tryReserve(reserved):
+					return s.executeForceStream(ctx, logger, reqCtx, shape, reserved)
+				default:
+					coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultFallbackBudget)
+				}
 			}
 		}
 	}

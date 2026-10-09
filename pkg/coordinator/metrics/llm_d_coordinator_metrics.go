@@ -190,8 +190,8 @@ var (
 		prometheus.CounterOpts{
 			Subsystem: LLMDRouterCoordinatorSubsystem,
 			Name:      "force_stream_total",
-			Help:      metricsutil.HelpMsgWithStability("Total number of force-stream candidate requests by outcome: forced (reassembled from a streamed upstream), fallback_budget (budget full), fallback_unbounded (no output token limit to reserve), fallback_unsupported (chat/text reply may carry fields the reassembler drops), or error_ceiling (aborted for exceeding its reserved budget). The fallback outcomes take the non-forced pass-through.", compbasemetrics.ALPHA),
+			Help:      metricsutil.HelpMsgWithStability("Total number of force-stream candidate requests by model and outcome: forced (reassembled from a streamed upstream), fallback_budget (budget full), fallback_unbounded (no output token limit to reserve, or an estimate past the per-request cap), fallback_unsupported (chat/text reply may carry fields the reassembler drops), or error_ceiling (aborted for exceeding its reserved budget). The fallback outcomes take the non-forced pass-through.", compbasemetrics.ALPHA),
 		},
-		[]string{"result"},
+		withLabel(modelLabel, "result"),
 	)
 )

@@ -46,6 +46,14 @@ import (
 // a node that runs GPU inference, so an operator overrides it only to tune.
 const defaultForceStreamBufferSize = "1GiB"
 
+// defaultForceStreamMaxRequestBytes caps one forced request's reservation when
+// force_stream_max_request_size is unset. 256KiB holds roughly 16k output tokens
+// for a single choice, enough for a large reply while keeping one request from
+// claiming a large share of the shared budget. It is a fixed size rather than a
+// fraction of the budget: the cap bounds a single reply, not a slice of the
+// aggregate. Capped to the budget when that is smaller.
+const defaultForceStreamMaxRequestBytes int64 = 256 << 10
+
 const (
 	// forceStreamBytesPerToken bounds the decoded UTF-8 bytes one output token
 	// contributes. A token's text spans a few code points and UTF-8 uses at
@@ -105,15 +113,50 @@ func parseForceStreamBudget(params map[string]any) (*forceStreamBudget, error) {
 	if size > math.MaxInt64 {
 		return nil, fmt.Errorf("%s: %q exceeds the maximum budget", ParamForceStreamBufferSize, sizeStr)
 	}
-	return newForceStreamBudget(int64(size)), nil
+
+	perRequest, err := parseForceStreamPerRequest(params, size)
+	if err != nil {
+		return nil, err
+	}
+	return newForceStreamBudget(int64(size), perRequest), nil
+}
+
+// parseForceStreamPerRequest reads force_stream_max_request_size into the
+// per-request reservation cap. Unset defaults to defaultForceStreamMaxRequestBytes
+// (capped to the shared budget when that is smaller), so one request cannot claim
+// a large share of the budget without the operator opting in. An explicit value
+// must be in (0, max]: a cap above the shared budget could never bind, so it fails
+// config load rather than clamping silently.
+func parseForceStreamPerRequest(params map[string]any, budgetMax uint64) (int64, error) {
+	sizeStr, err := paramString(params, ParamForceStreamMaxRequestSize)
+	if err != nil {
+		return 0, err
+	}
+	if sizeStr == "" {
+		if budgetMax < uint64(defaultForceStreamMaxRequestBytes) {
+			return int64(budgetMax), nil
+		}
+		return defaultForceStreamMaxRequestBytes, nil
+	}
+	size, err := humanize.ParseBytes(sizeStr)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", ParamForceStreamMaxRequestSize, err)
+	}
+	if size == 0 {
+		return 0, fmt.Errorf("%s: must be greater than zero", ParamForceStreamMaxRequestSize)
+	}
+	if size > budgetMax {
+		return 0, fmt.Errorf("%s: %q exceeds %s", ParamForceStreamMaxRequestSize, sizeStr, ParamForceStreamBufferSize)
+	}
+	return int64(size), nil
 }
 
 // estimateReservation sizes the buffer one forced request may hold and reports
 // whether force-streaming it is safe. ok is false when the body names no output
-// token limit (an unbounded response cannot be reserved) or when even its own
-// estimate exceeds the whole budget (one request must never claim more than the
-// shared cap). The estimate reserves n completions, each tokenLimit tokens, plus
-// the reply envelope; over-reserving only sends more requests to the
+// token limit (an unbounded response cannot be reserved) or when its estimate
+// exceeds the per-request cap (one request must never claim more than its share
+// of the shared budget). The estimate reserves n completions, each tokenLimit
+// tokens, plus the reply envelope; over-reserving only sends more requests to the
 // pass-through, never past the budget.
 func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64, bool) {
 	apiType := reqcommon.DetectAPIType(reqCtx.OriginalPath)
@@ -123,7 +166,7 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 	}
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, apiType)
 
-	maxBytes := s.budget.max
+	maxBytes := s.budget.perRequestMax
 	if maxBytes <= forceStreamBaseOverheadBytes {
 		return 0, false
 	}
@@ -151,10 +194,8 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 // a ceiling abort returns a plain error and the server answers a clean 5xx. An
 // upstream status in the 4xx/5xx range is forwarded verbatim and reported with
 // UpstreamStreamedError so the server does not overwrite it.
-func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, reserved int64) error {
+func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, reserved int64) error {
 	defer s.budget.release(reserved)
-
-	shape := shapeForAPIType(reqcommon.DetectAPIType(reqCtx.OriginalPath))
 
 	bodyBytes, headers, err := buildForceStreamRequest(reqCtx, shape)
 	if err != nil {
@@ -180,10 +221,11 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		return forwardUpstreamError(reqCtx, resp)
 	}
 
-	reassembler := newSSEReassembler(shape)
+	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))
+	reassembler := newSSEReassembler(shape, n)
 	if err := scanForcedResponse(resp.Body, reassembler, reserved); err != nil {
 		if errors.Is(err, errForceStreamCeiling) {
-			coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultErrorCeiling)
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorCeiling)
 			logger.Error(err, "force-stream aborted", "reservedBytes", reserved)
 		}
 		return fmt.Errorf("%s: %w", DecodeStepName, err)
@@ -250,15 +292,29 @@ func forceStreamBody(src map[string]any, shape sseShape) map[string]any {
 	return body
 }
 
-// maxFrameBytes bounds a single SSE line. The per-token chunk shapes keep the
-// small-frame guard; the Responses shape delivers its whole reply in one
-// response.completed frame, so its cap rises to the request's reservation (the
-// running ceiling already bounds the generated bytes).
+// maxFrameBytes bounds a single SSE line, holding the scanner's transient buffer
+// within the request's reservation (the bytes the budget accounts for). The
+// per-token chunk shapes also keep the small-frame guard: their frames are small,
+// so a frame near the reservation or 1 MiB is malformed. The Responses shape
+// delivers its whole reply in one response.completed frame, so its only bound is
+// the reservation.
 func maxFrameBytes(shape sseShape, reserved int64) int {
-	if shape == sseShapeResponses && reserved > forceStreamMaxFrameBytes {
-		return int(reserved)
+	if shape != sseShapeResponses && reserved > forceStreamMaxFrameBytes {
+		return forceStreamMaxFrameBytes
 	}
-	return forceStreamMaxFrameBytes
+	return int(reserved)
+}
+
+// initialScanBuf sizes the scanner's starting buffer so the effective maximum
+// frame size is frameCap. bufio caps a token at the larger of its max argument
+// and the starting buffer's capacity, so a starting capacity above frameCap would
+// let the buffer grow past the reservation.
+func initialScanBuf(frameCap int) int {
+	const start = 64 << 10
+	if frameCap < start {
+		return frameCap
+	}
+	return start
 }
 
 // scanForcedResponse folds the upstream SSE frames into reassembler, enforcing
@@ -267,7 +323,8 @@ func maxFrameBytes(shape sseShape, reserved int64) int {
 // return before any byte is written to the client.
 func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved int64) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64<<10), maxFrameBytes(reassembler.shape, reserved))
+	frameCap := maxFrameBytes(reassembler.shape, reserved)
+	scanner.Buffer(make([]byte, 0, initialScanBuf(frameCap)), frameCap)
 	for scanner.Scan() {
 		payload, ok := ssePayload(scanner.Bytes())
 		if !ok {
@@ -316,7 +373,7 @@ func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, re
 		// the request was served as far as the coordinator is concerned.
 		logger.Error(err, "force-stream client write incomplete")
 	}
-	coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultForced)
+	coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultForced)
 	logger.V(logutil.DEFAULT).Info("force-stream complete", "bytes", len(payload))
 	return nil
 }
