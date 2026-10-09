@@ -95,7 +95,7 @@ func streamForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, b
 	em.clearWriteDeadline()
 
 	scanner := bufio.NewScanner(body)
-	scanner.Buffer(make([]byte, 0, 64<<10), forceStreamMaxFrameBytes)
+	scanner.Buffer(make([]byte, 0, forceStreamScanStartBytes), forceStreamMaxFrameBytes)
 	for scanner.Scan() {
 		payload, ok := ssePayload(scanner.Bytes())
 		if !ok {

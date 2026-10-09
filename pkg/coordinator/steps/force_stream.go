@@ -73,6 +73,9 @@ const (
 	// (one token delta), so this bounds a single malformed or oversized frame
 	// rather than a whole response.
 	forceStreamMaxFrameBytes = 1 << 20
+	// forceStreamScanStartBytes is the SSE scanner's initial buffer size; it
+	// grows as needed toward the per-request frame cap.
+	forceStreamScanStartBytes = 64 << 10
 )
 
 // errForceStreamCeiling marks a forced request aborted because its buffered
@@ -310,11 +313,10 @@ func maxFrameBytes(shape sseShape, reserved int64) int {
 // and the starting buffer's capacity, so a starting capacity above frameCap would
 // let the buffer grow past the reservation.
 func initialScanBuf(frameCap int) int {
-	const start = 64 << 10
-	if frameCap < start {
+	if frameCap < forceStreamScanStartBytes {
 		return frameCap
 	}
-	return start
+	return forceStreamScanStartBytes
 }
 
 // scanForcedResponse folds the upstream SSE frames into reassembler, enforcing
@@ -343,9 +345,9 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved int64
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		// The Responses single-frame cap is the request's reservation, so a
-		// frame that trips the scanner buffer has overflowed the budget; count
-		// it as a ceiling abort rather than a generic read error.
+		// The scanner's frame cap is the request's reservation (or the 1 MiB
+		// guard), so a frame that trips it has overflowed the reserved budget;
+		// count it as a ceiling abort rather than a generic read error.
 		if errors.Is(err, bufio.ErrTooLong) {
 			return errForceStreamCeiling
 		}
