@@ -282,7 +282,7 @@ func (e *incrementalEmitter) finish(logger logr.Logger) error {
 		return e.failOrTruncate(logger, err)
 	}
 	if _, err := e.w.Write(e.suffix()); err != nil {
-		logger.V(logutil.DEFAULT).Info("force-stream client write incomplete", "error", err)
+		logger.Error(err, "force-stream client write incomplete")
 		return nil
 	}
 	_ = e.rc.Flush()
@@ -299,7 +299,7 @@ func (e *incrementalEmitter) failOrTruncate(logger logr.Logger, err error) error
 	if !e.started {
 		return fmt.Errorf("%s: %w", DecodeStepName, err)
 	}
-	logger.V(logutil.DEFAULT).Info("force-stream truncated after commit", "error", err)
+	logger.Error(err, "force-stream truncated after commit")
 	return nil
 }
 

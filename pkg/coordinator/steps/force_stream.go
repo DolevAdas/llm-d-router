@@ -210,10 +210,10 @@ func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	switch lp := body[reqcommon.FieldLogprobs].(type) {
 	case bool:
 		return lp
-	case float64:
-		return lp > 0
-	case int:
-		return lp > 0
+	case float64, int:
+		// On the legacy Completions API logprobs is a count, and the field's
+		// presence (including the value 0) requests the sampled token's logprob.
+		return true
 	}
 	return false
 }
@@ -286,6 +286,12 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved int64
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// The Responses single-frame cap is the request's reservation, so a
+		// frame that trips the scanner buffer has overflowed the budget; count
+		// it as a ceiling abort rather than a generic read error.
+		if errors.Is(err, bufio.ErrTooLong) {
+			return errForceStreamCeiling
+		}
 		return fmt.Errorf("force-stream: read upstream: %w", err)
 	}
 	return nil
@@ -308,7 +314,7 @@ func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, re
 		// The response is already committed; the client disconnected mid-write.
 		// Report success to the pipeline and record the forced outcome, since
 		// the request was served as far as the coordinator is concerned.
-		logger.V(logutil.DEFAULT).Info("force-stream client write incomplete", "error", err)
+		logger.Error(err, "force-stream client write incomplete")
 	}
 	coordmetrics.IncForceStreamTotal(coordmetrics.ForceStreamResultForced)
 	logger.V(logutil.DEFAULT).Info("force-stream complete", "bytes", len(payload))
