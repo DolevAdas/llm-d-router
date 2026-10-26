@@ -2233,3 +2233,45 @@ func TestIsErrorFrame(t *testing.T) {
 		})
 	}
 }
+
+// TestForceStream_PrefillCachedTokens covers the prefill cache-hit count on a
+// forced reply. A decode pod counts the KV blocks transferred from prefill as
+// prompt-cache hits, so the coordinator reports prefill's count instead, on the
+// forced reply as on the pass-through.
+func TestForceStream_PrefillCachedTokens(t *testing.T) {
+	frames := []string{
+		`{"id":"c","model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hi"}}]}`,
+		`{"id":"c","model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		`{"id":"c","model":"m","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":1,"total_tokens":101,"prompt_tokens_details":{"cached_tokens":96}}}`,
+	}
+	server := sseServer(t, frames, nil)
+	defer server.Close()
+
+	step, reg := newForceStreamStep(t, server.URL, "1GiB")
+	prefillCached := 32
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:           "req-cached",
+		OriginalPath:        reqcommon.PathChatCompletions,
+		Model:               "m",
+		Stream:              false,
+		KVTransferParams:    map[string]any{},
+		PrefillCachedTokens: &prefillCached,
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.Execute(context.Background(), reqCtx))
+	result := recorder.Result()
+	respBody, _ := io.ReadAll(result.Body)
+	// The rewrite can change the body size, so the stale Content-Length is dropped.
+	require.Empty(t, result.Header.Get("Content-Length"))
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(respBody, &got))
+	details := got["usage"].(map[string]any)["prompt_tokens_details"].(map[string]any)
+	require.EqualValues(t, prefillCached, details["cached_tokens"], "the forced reply reports the prefill cache-hit count")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+}

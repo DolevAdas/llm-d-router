@@ -282,12 +282,12 @@ func (s *DecodeStep) estimateReservation(reqCtx *pipeline.RequestContext) (int64
 // writes that reply to the client. It balances the reservation on every exit.
 //
 // Nothing reaches the client until the whole response is buffered, so every error
-// here leaves the client uncommitted. A transport failure or a ceiling abort
-// returns a plain error and the server answers a clean 5xx; an upstream 4xx/5xx is
-// forwarded verbatim and reported with UpstreamStreamedError so the server does not
-// overwrite it. The fallback sentinels (oversize, lossy-frame, unreadable,
-// truncated) instead return so decode runs the pass-through, which can still serve
-// the request or preserve a field the fold would drop.
+// here leaves the client uncommitted. A transport failure returns a plain error and
+// the server answers a clean 5xx; an upstream 4xx/5xx, or an error frame streamed
+// after the 200, is forwarded and reported with UpstreamStreamedError so the server
+// does not overwrite it. The fallback sentinels (ceiling, oversize, lossy-frame,
+// unreadable, truncated) instead return so decode runs the pass-through, which can
+// still serve the request or preserve a field the fold would drop.
 func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger, reqCtx *pipeline.RequestContext, shape sseShape, reserved int64) error {
 	defer s.budget.release(reserved)
 
@@ -355,7 +355,8 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 		return fmt.Errorf("%s: %w", DecodeStepName, err)
 	}
 
-	return writeForcedResponse(logger, reqCtx, reassembler)
+	writer, finalize := s.responseWriter(reqCtx)
+	return writeForcedResponse(logger, reqCtx, writer, finalize, reassembler)
 }
 
 // forceStreamLossy reports whether force-streaming would drop fields the
@@ -561,19 +562,24 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved, requ
 }
 
 // writeForcedResponse marshals the reassembled reply and writes it as one
-// non-streaming JSON response. A marshal failure returns a plain error before
-// any write, so the server answers a clean 502.
-func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, reassembler *sseReassembler) error {
+// non-streaming JSON response through w, the decode step's response writer, so
+// the forced reply gets the same usage rewrite as the pass-through; finalize
+// flushes what w buffered. A marshal failure returns a plain error before any
+// write, so the server answers a clean 502.
+func writeForcedResponse(logger logr.Logger, reqCtx *pipeline.RequestContext, w http.ResponseWriter, finalize func() error, reassembler *sseReassembler) error {
 	payload, err := json.Marshal(reassembler.result())
 	if err != nil {
 		return fmt.Errorf("%s: force-stream marshal response: %w", DecodeStepName, err)
 	}
 
-	w := reqCtx.ResponseWriter
 	w.Header().Set(gateway.ContentTypeHeader, reqcommon.ContentTypeJSON)
 	w.Header().Set("Content-Length", strconv.Itoa(len(payload)))
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write(payload); err != nil {
+	_, err = w.Write(payload)
+	if err == nil {
+		err = finalize()
+	}
+	if err != nil {
 		// The response is already committed; the client disconnected mid-write.
 		// Report success to the pipeline and record the forced outcome, since
 		// the request was served as far as the coordinator is concerned.

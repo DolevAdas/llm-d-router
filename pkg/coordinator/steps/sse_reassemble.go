@@ -489,8 +489,8 @@ func (r *sseReassembler) result() map[string]any {
 	out["choices"] = choices
 
 	// The generate endpoint's non-streaming reply carries no usage block, so the
-	// forced reply drops the one its stream_options.include_usage frame supplied.
-	// Chat and text non-streaming replies do carry usage, so it is folded there.
+	// forced reply drops any usage its stream reports. Chat and text non-streaming
+	// replies do carry usage, so it is folded there.
 	if r.usage != nil && r.shape != sseShapeGenerate {
 		out[reqcommon.FieldUsage] = r.usage
 	}
