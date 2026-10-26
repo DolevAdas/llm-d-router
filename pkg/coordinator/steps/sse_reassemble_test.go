@@ -405,11 +405,14 @@ func TestSSEReassemble_MessagesUsageMerge(t *testing.T) {
 	r := newSSEReassembler(sseShapeMessages, 0)
 	r.add(frame(t, `{"type":"message_start","message":{"usage":{"input_tokens":2679,"output_tokens":3}}}`))
 	r.add(frame(t, `{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}`))
-	r.add(frame(t, `{"type":"message_delta","usage":{"input_tokens":10682,"output_tokens":510}}`))
+	r.add(frame(t, `{"type":"message_delta","usage":{"input_tokens":10682,"cache_creation_input_tokens":64,"cache_read_input_tokens":128,"output_tokens":510,"server_tool_use":{"web_search_requests":1}}}`))
 
 	usage := r.result()["usage"].(map[string]any)
 	require.EqualValues(t, 10682, usage["input_tokens"], "message_delta input_tokens supersede message_start")
 	require.EqualValues(t, 510, usage["output_tokens"])
+	require.EqualValues(t, 64, usage["cache_creation_input_tokens"])
+	require.EqualValues(t, 128, usage["cache_read_input_tokens"])
+	require.Equal(t, map[string]any{"web_search_requests": float64(1)}, usage["server_tool_use"])
 }
 
 // A non-text content block marks the reply lossy so force-streaming falls back and

@@ -502,9 +502,9 @@ func (r *sseReassembler) result() map[string]any {
 
 // messagesResult builds the Anthropic Messages reply from the folded events: the
 // envelope (id, type, role, model), one text content block, the terminal
-// stop_reason/stop_sequence, and usage trimmed to input_tokens/output_tokens so the
-// forced reply matches the pod's non-streaming body. Reassembly runs only for a
-// text-only reply; a non-text block flags lossyFrame and falls back before here.
+// stop_reason/stop_sequence, and every usage field merged from message_start and
+// message_delta. Reassembly runs only for a text-only reply; a non-text block
+// flags lossyFrame and falls back before here.
 func (r *sseReassembler) messagesResult() map[string]any {
 	role := r.messageRole
 	if role == "" {
@@ -530,14 +530,7 @@ func (r *sseReassembler) messagesResult() map[string]any {
 		out[fieldStopSequence] = r.stopSequence
 	}
 	if r.usage != nil {
-		usage := map[string]any{}
-		if v, ok := r.usage[reqcommon.FieldInputTokens]; ok {
-			usage[reqcommon.FieldInputTokens] = v
-		}
-		if v, ok := r.usage[reqcommon.FieldOutputTokens]; ok {
-			usage[reqcommon.FieldOutputTokens] = v
-		}
-		out[reqcommon.FieldUsage] = usage
+		out[reqcommon.FieldUsage] = r.usage
 	}
 	return out
 }
