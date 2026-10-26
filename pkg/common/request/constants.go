@@ -159,7 +159,6 @@ const (
 	PartTypeInputImage         = "input_image"
 	PartTypeInputFile          = "input_file"
 	PartTypeComputerScreenshot = "computer_screenshot"
-	PartTypeOutputText         = "output_text"
 )
 
 // Anthropic Messages block types. An image block holds its image in a
