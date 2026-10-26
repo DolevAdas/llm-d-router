@@ -255,17 +255,38 @@ func TestSSEReassemble_DropsNegativeChoiceIndex(t *testing.T) {
 	require.EqualValues(t, len("keep"), r.bufferedBytes())
 }
 
-// TestSSEReassemble_NonNumericIndexDefaultsToZero verifies a choice whose index is
-// not a number (a malformed frame) folds into index 0 rather than being dropped or
-// panicking: numField reports not-ok and foldChoice keeps its default.
-func TestSSEReassemble_NonNumericIndexDefaultsToZero(t *testing.T) {
-	r := newSSEReassembler(sseShapeText, 0)
-	r.add(frame(t, `{"choices":[{"index":"oops","text":"hi"}]}`))
+// TestSSEReassemble_ChoiceIndex verifies how a choice's index selects its
+// accumulator. An absent or null index folds into choice 0, so a single-choice
+// stream that omits it still reassembles. An index present but not a non-negative
+// integer (a malformed frame) is dropped like a negative one, rather than
+// truncated or guessed into another choice.
+func TestSSEReassemble_ChoiceIndex(t *testing.T) {
+	tests := []struct {
+		name  string
+		index string
+		want  bool
+	}{
+		{"absent", ``, true},
+		{"null", `"index":null,`, true},
+		{"non-numeric", `"index":"oops",`, false},
+		{"non-integral", `"index":1.5,`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newSSEReassembler(sseShapeText, 2)
+			r.add(frame(t, `{"choices":[{`+tc.index+`"text":"hi"}]}`))
 
-	choices := r.result()["choices"].([]any)
-	require.Len(t, choices, 1)
-	require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
-	require.Equal(t, "hi", choices[0].(map[string]any)["text"])
+			choices := r.result()["choices"].([]any)
+			if !tc.want {
+				require.Empty(t, choices, "an invalid index must not create a choice")
+				require.Zero(t, r.bufferedBytes(), "a dropped choice is not charged to the ceiling")
+				return
+			}
+			require.Len(t, choices, 1)
+			require.EqualValues(t, 0, choices[0].(map[string]any)["index"])
+			require.Equal(t, "hi", choices[0].(map[string]any)["text"])
+		})
+	}
 }
 
 // TestSSEReassemble_CapturesSystemFingerprint verifies the chat envelope carries

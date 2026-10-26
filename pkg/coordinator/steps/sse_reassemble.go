@@ -344,19 +344,6 @@ func (r *sseReassembler) captureMeta(frame map[string]any) {
 	}
 }
 
-// numField reads a numeric choice index. JSON decodes it to float64; a producer
-// that supplies a Go int is tolerated too.
-func numField(v any) (int, bool) {
-	switch n := v.(type) {
-	case float64:
-		return int(n), true
-	case int:
-		return n, true
-	default:
-		return 0, false
-	}
-}
-
 func (r *sseReassembler) choice(index int) *sseChoice {
 	c, ok := r.choices[index]
 	if !ok {
@@ -367,17 +354,21 @@ func (r *sseReassembler) choice(index int) *sseChoice {
 	return c
 }
 
-// foldChoice appends one streamed choice fragment to its accumulator. The index
-// defaults to 0 so a single-choice stream that omits it still folds into one
-// choice. An index that is negative or at or beyond the declared n is dropped, so
-// an upstream returning out-of-range or surplus choices cannot grow the choice map
-// past the reservation.
+// foldChoice appends one streamed choice fragment to its accumulator. An absent
+// or null index defaults to 0 so a single-choice stream that omits it still folds
+// into one choice. An index that is not a non-negative integer, or is at or beyond
+// the declared n, is dropped, so an upstream returning malformed, out-of-range, or
+// surplus choices cannot grow the choice map past the reservation.
 func (r *sseReassembler) foldChoice(choice map[string]any) {
 	index := 0
-	if n, ok := numField(choice["index"]); ok {
+	if v := choice["index"]; v != nil {
+		n, ok := reqcommon.NonNegativeInt(v)
+		if !ok {
+			return
+		}
 		index = n
 	}
-	if index < 0 || (r.maxChoices > 0 && index >= r.maxChoices) {
+	if r.maxChoices > 0 && index >= r.maxChoices {
 		return
 	}
 	acc := r.choice(index)

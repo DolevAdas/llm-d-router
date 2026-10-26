@@ -94,7 +94,7 @@ func OutputTokenLimit(body map[string]any, apiType APIType) (int, bool) {
 		if !set {
 			continue
 		}
-		if n, ok := nonNegativeInt(v); ok {
+		if n, ok := NonNegativeInt(v); ok {
 			return n, true
 		}
 	}
@@ -116,18 +116,18 @@ func OutputChoiceCount(body map[string]any, apiType APIType) int {
 	if !set {
 		return 1
 	}
-	if n, ok := nonNegativeInt(v); ok && n >= 1 {
+	if n, ok := NonNegativeInt(v); ok && n >= 1 {
 		return n
 	}
 	return 1
 }
 
-// nonNegativeInt coerces a JSON-decoded number into a non-negative int. A client
+// NonNegativeInt coerces a JSON-decoded number into a non-negative int. A client
 // body decodes a number as float64, a body left raw and decoded with UseNumber
 // as json.Number, and a body built in-process may hold a Go integer; a value
 // that is negative, non-integral, or outside int range is rejected rather than
 // truncated.
-func nonNegativeInt(v any) (int, bool) {
+func NonNegativeInt(v any) (int, bool) {
 	var f float64
 	switch n := v.(type) {
 	case float64:

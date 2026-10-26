@@ -478,6 +478,38 @@ func TestOutputChoiceCount(t *testing.T) {
 	}
 }
 
+func TestNonNegativeInt(t *testing.T) {
+	tests := []struct {
+		name   string
+		v      any
+		want   int
+		wantOK bool
+	}{
+		{"float64", float64(3), 3, true},
+		{"zero", float64(0), 0, true},
+		{"json.Number", json.Number("7"), 7, true},
+		{"int", 5, 5, true},
+		{"int64", int64(9), 9, true},
+		{"negative float64", float64(-1), 0, false},
+		{"negative int", -1, 0, false},
+		{"negative int64", int64(-1), 0, false},
+		{"non-integral", 1.5, 0, false},
+		{"non-integral json.Number", json.Number("1.5"), 0, false},
+		{"malformed json.Number", json.Number("x"), 0, false},
+		{"out of range", 1e300, 0, false},
+		{"string", "3", 0, false},
+		{"nil", nil, 0, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := NonNegativeInt(tc.v)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("NonNegativeInt(%#v) = (%d, %v), want (%d, %v)", tc.v, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestRejectStatefulResponsesFields(t *testing.T) {
 	tests := []struct {
 		name      string
