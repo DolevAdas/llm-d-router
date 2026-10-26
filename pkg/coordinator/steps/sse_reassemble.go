@@ -362,8 +362,8 @@ func (r *sseReassembler) choice(index int) *sseChoice {
 func (r *sseReassembler) foldChoice(choice map[string]any) {
 	index := 0
 	if v := choice["index"]; v != nil {
-		n, ok := reqcommon.NonNegativeInt(v)
-		if !ok {
+		n, err := reqcommon.NonNegativeInt(v)
+		if err != nil {
 			return
 		}
 		index = n

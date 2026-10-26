@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"maps"
 	"math"
+	"strconv"
 )
 
 // CapSingleToken rewrites body into a synthetic, non-streaming,
@@ -94,7 +95,7 @@ func OutputTokenLimit(body map[string]any, apiType APIType) (int, bool) {
 		if !set {
 			continue
 		}
-		if n, ok := NonNegativeInt(v); ok {
+		if n, err := NonNegativeInt(v); err == nil {
 			return n, true
 		}
 	}
@@ -116,45 +117,47 @@ func OutputChoiceCount(body map[string]any, apiType APIType) int {
 	if !set {
 		return 1
 	}
-	if n, ok := NonNegativeInt(v); ok && n >= 1 {
+	if n, err := NonNegativeInt(v); err == nil && n >= 1 {
 		return n
 	}
 	return 1
 }
 
 // NonNegativeInt coerces a JSON-decoded number into a non-negative int. A client
-// body decodes a number as float64, a body left raw and decoded with UseNumber
-// as json.Number, and a body built in-process may hold a Go integer; a value
-// that is negative, non-integral, or outside int range is rejected rather than
-// truncated.
-func NonNegativeInt(v any) (int, bool) {
-	var f float64
+// body decodes a number as float64, a body decoded with UseNumber as
+// json.Number, and a body built in-process may hold a Go integer. A value that
+// is negative, non-integral, or outside int range is an error rather than a
+// truncation.
+func NonNegativeInt(v any) (int, error) {
 	switch n := v.(type) {
 	case float64:
-		f = n
+		// float64 cannot represent MaxInt exactly (on 64-bit it rounds up to 2^63),
+		// and converting a value at or past that bound to int is platform-defined,
+		// so the bound is the first float64 past MaxInt.
+		if n < 0 || n != math.Trunc(n) || n >= float64(1<<(strconv.IntSize-1)) {
+			return 0, fmt.Errorf("expected non-negative integer, got %v", v)
+		}
+		return int(n), nil
 	case json.Number:
-		parsed, err := n.Float64()
+		i, err := n.Int64()
 		if err != nil {
-			return 0, false
+			return 0, err
 		}
-		f = parsed
+		return nonNegativeInt64(i)
 	case int:
-		if n < 0 {
-			return 0, false
-		}
-		return n, true
+		return nonNegativeInt64(int64(n))
 	case int64:
-		if n < 0 || n > math.MaxInt {
-			return 0, false
-		}
-		return int(n), true
+		return nonNegativeInt64(n)
 	default:
-		return 0, false
+		return 0, fmt.Errorf("expected number, got %T", v)
 	}
-	if f < 0 || f != math.Trunc(f) || f > math.MaxInt {
-		return 0, false
+}
+
+func nonNegativeInt64(i int64) (int, error) {
+	if i < 0 || i > math.MaxInt {
+		return 0, fmt.Errorf("expected non-negative integer, got %d", i)
 	}
-	return int(f), true
+	return int(i), nil
 }
 
 // RejectStatefulResponsesFields reports an error naming the first field it

@@ -497,14 +497,18 @@ func TestNonNegativeInt(t *testing.T) {
 		{"non-integral json.Number", json.Number("1.5"), 0, false},
 		{"malformed json.Number", json.Number("x"), 0, false},
 		{"out of range", 1e300, 0, false},
+		// 2^63 is the first float64 past MaxInt64; converting it to int is
+		// platform-defined (negative on amd64, saturated on arm64).
+		{"float64 at 2^63", float64(1 << 63), 0, false},
+		{"json.Number at 2^63", json.Number("9223372036854775808"), 0, false},
 		{"string", "3", 0, false},
 		{"nil", nil, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := NonNegativeInt(tc.v)
-			if got != tc.want || ok != tc.wantOK {
-				t.Errorf("NonNegativeInt(%#v) = (%d, %v), want (%d, %v)", tc.v, got, ok, tc.want, tc.wantOK)
+			got, err := NonNegativeInt(tc.v)
+			if got != tc.want || (err == nil) != tc.wantOK {
+				t.Errorf("NonNegativeInt(%#v) = (%d, %v), want (%d, ok=%v)", tc.v, got, err, tc.want, tc.wantOK)
 			}
 		})
 	}
