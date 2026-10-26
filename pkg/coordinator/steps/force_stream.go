@@ -122,6 +122,39 @@ var errForceStreamTruncated = errors.New("force-stream: upstream stream ended be
 // errForceStreamUnreadable.
 var errForceStreamLossyFrame = errors.New("force-stream: streamed delta carried an unfoldable field; falling back to pass-through")
 
+// Fields of an error frame a pod streams after its 200 headers. The vLLM and
+// SGLang chat and completions streams send the OpenAI envelope, an error object
+// holding the HTTP status as code, and then [DONE]. The Responses API's error
+// event and the Anthropic Messages error event carry type "error" instead.
+const (
+	eventTypeError = "error"
+	fieldError     = "error"
+	fieldCode      = "code"
+)
+
+// isErrorFrame reports whether a data frame is a streamed error rather than a
+// piece of the reply.
+func isErrorFrame(frame map[string]any) bool {
+	if frame[reqcommon.FieldType] == eventTypeError {
+		return true
+	}
+	_, ok := frame[fieldError].(map[string]any)
+	return ok
+}
+
+// forceStreamUpstreamError marks a forced stream that carried an error frame.
+// The pod has answered the request, so the decode step forwards payload, the
+// frame as streamed, with status and does not fall back: a re-send would repeat
+// the request to the pod that just failed it, possibly for being overloaded.
+type forceStreamUpstreamError struct {
+	status  int
+	payload []byte
+}
+
+func (e *forceStreamUpstreamError) Error() string {
+	return fmt.Sprintf("force-stream: upstream streamed an error (HTTP %d)", e.status)
+}
+
 // sseDataPrefix and sseDoneMarker delimit the SSE frames the upstream streams.
 // Each data line carries one JSON object; the stream ends with data: [DONE].
 // sseDataPrefix drops the trailing space reqcommon.SSEDataPrefix carries so it
@@ -287,7 +320,11 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	n := reqcommon.OutputChoiceCount(reqCtx.Body, reqcommon.DetectAPIType(reqCtx.OriginalPath))
 	reassembler := newSSEReassembler(shape, n)
 	if err := scanForcedResponse(resp.Body, reassembler, reserved, int64(len(bodyBytes))); err != nil {
+		var upstreamErr *forceStreamUpstreamError
 		switch {
+		case errors.As(err, &upstreamErr):
+			coordmetrics.IncForceStreamTotal(reqCtx.Model, coordmetrics.ForceStreamResultErrorUpstream)
+			return writeUpstreamError(reqCtx, upstreamErr.status, reqcommon.ContentTypeJSON, upstreamErr.payload)
 		case errors.Is(err, errForceStreamCeiling):
 			// decode records error_ceiling and runs the pass-through. A buffered reply
 			// past its reservation usually means the per-token byte estimate came up
@@ -456,9 +493,10 @@ func initialScanBuf(frameCap int) int {
 
 // scanForcedResponse folds the upstream SSE frames into reassembler, enforcing
 // the per-request ceiling. A frame that cannot be parsed or a read failure is an
-// upstream fault; exceeding the ceiling returns errForceStreamCeiling. Both
-// return before any byte is written to the client. requestBytes sizes the Responses
-// terminal-frame allowance (see maxFrameBytes).
+// upstream fault; exceeding the ceiling returns errForceStreamCeiling; an error
+// frame returns a forceStreamUpstreamError carrying it. All return before any
+// byte is written to the client. requestBytes sizes the Responses terminal-frame
+// allowance (see maxFrameBytes).
 func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved, requestBytes int64) error {
 	scanner := bufio.NewScanner(r)
 	frameCap := maxFrameBytes(reassembler.shape, reserved, requestBytes)
@@ -476,6 +514,12 @@ func scanForcedResponse(r io.Reader, reassembler *sseReassembler, reserved, requ
 		var frame map[string]any
 		if err := json.Unmarshal(payload, &frame); err != nil {
 			return fmt.Errorf("force-stream: parse frame: %w", err)
+		}
+		// The chat, text, and generate streams follow an error frame with [DONE],
+		// so it is caught here, before the marker could pass the partial reply off
+		// as complete.
+		if isErrorFrame(frame) {
+			return &forceStreamUpstreamError{status: upstreamErrorStatus(frame), payload: bytes.Clone(payload)}
 		}
 		reassembler.add(frame)
 		if reassembler.lossyFrame {
@@ -550,12 +594,37 @@ func forwardUpstreamError(reqCtx *pipeline.RequestContext, resp *http.Response) 
 	if contentType == "" {
 		contentType = reqcommon.ContentTypeJSON
 	}
+	return writeUpstreamError(reqCtx, resp.StatusCode, contentType, respBody)
+}
 
+// writeUpstreamError writes an upstream error status and body to the client and
+// returns UpstreamStreamedError, so the server records the failure without
+// writing another response.
+func writeUpstreamError(reqCtx *pipeline.RequestContext, status int, contentType string, body []byte) error {
 	w := reqCtx.ResponseWriter
 	w.Header().Set(gateway.ContentTypeHeader, contentType)
-	w.WriteHeader(resp.StatusCode)
-	_, _ = w.Write(respBody)
-	return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: resp.StatusCode}
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+	return &pipeline.UpstreamStreamedError{Step: DecodeStepName, StatusCode: status}
+}
+
+// upstreamErrorStatus returns the HTTP status a streamed error frame names: the
+// OpenAI envelope's numeric code, or the status of an Anthropic error type. A
+// frame naming neither (a Responses error event's code is a string such as
+// server_error) is a server error.
+func upstreamErrorStatus(frame map[string]any) int {
+	errObj, ok := frame[fieldError].(map[string]any)
+	if !ok {
+		return http.StatusInternalServerError
+	}
+	if code, ok := errObj[fieldCode].(float64); ok && code == math.Trunc(code) &&
+		code >= http.StatusBadRequest && code <= 599 {
+		return int(code)
+	}
+	if errType, ok := errObj[reqcommon.FieldType].(string); ok {
+		return reqcommon.AnthropicErrorStatus(errType)
+	}
+	return http.StatusInternalServerError
 }
 
 // ssePayload extracts the JSON payload of an SSE data line, trimming the data:

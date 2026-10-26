@@ -2005,3 +2005,231 @@ func TestForceStream_Concurrency(t *testing.T) {
 	require.InDelta(t, float64(n), forced+fallback, 1e-9, "every request must be accounted as forced or fallback")
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "no reservation may leak after all requests complete")
 }
+
+// TestForceStream_MidStreamError_ForwardsEnvelope covers an error the pod reports
+// after its 200 headers, as an SSE error frame. vLLM's chat, text, and generate
+// streams send {"error":{...}} and then [DONE]; its Responses and Messages streams
+// send a typed error event and end. The pod's error envelope reaches the client
+// with the status the frame names and no fallback re-send, since the pod already
+// answered (and a retry would re-send to a pod reporting itself overloaded).
+// Counted error_upstream.
+func TestForceStream_MidStreamError_ForwardsEnvelope(t *testing.T) {
+	tests := []struct {
+		name       string
+		path       string
+		body       map[string]any
+		frames     []string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name: "chat error then done",
+			path: reqcommon.PathChatCompletions,
+			body: map[string]any{"model": "m", "stream": false, "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "hi"}}},
+			frames: []string{
+				`data: {"id":"c","choices":[{"index":0,"delta":{"role":"assistant","content":"partial"}}]}`,
+				`data: {"error":{"message":"Internal server error","type":"InternalServerError","code":500}}`,
+				`data: [DONE]`,
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   `{"error":{"message":"Internal server error","type":"InternalServerError","code":500}}`,
+		},
+		{
+			name: "text error then done",
+			path: reqcommon.PathCompletions,
+			body: map[string]any{"model": "m", "stream": false, "max_tokens": 16, "prompt": "hi"},
+			frames: []string{
+				`data: {"id":"c","choices":[{"index":0,"text":"partial"}]}`,
+				`data: {"error":{"message":"Service unavailable","type":"ServiceUnavailableError","code":503}}`,
+				`data: [DONE]`,
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   `{"error":{"message":"Service unavailable","type":"ServiceUnavailableError","code":503}}`,
+		},
+		{
+			name: "generate error then done",
+			path: reqcommon.PathVLLMGenerate,
+			body: map[string]any{"model": "m", "stream": false, "token_ids": []any{1}, "sampling_params": map[string]any{"max_tokens": 8}},
+			frames: []string{
+				`data: {"request_id":"g","choices":[{"index":0,"token_ids":[1]}]}`,
+				`data: {"error":{"message":"Internal server error","type":"InternalServerError","code":500}}`,
+				`data: [DONE]`,
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   `{"error":{"message":"Internal server error","type":"InternalServerError","code":500}}`,
+		},
+		{
+			name: "responses error event",
+			path: reqcommon.PathResponses,
+			body: map[string]any{"model": "m", "stream": false, "max_output_tokens": 16, "input": "hi"},
+			frames: []string{
+				`data: {"type":"response.output_text.delta","delta":"partial"}`,
+				`data: {"type":"error","code":"server_error","message":"boom","param":null}`,
+			},
+			wantStatus: http.StatusInternalServerError,
+			wantBody:   `{"type":"error","code":"server_error","message":"boom","param":null}`,
+		},
+		{
+			name: "messages overloaded error",
+			path: reqcommon.PathMessages,
+			body: map[string]any{"model": "m", "stream": false, "max_tokens": 16, "messages": []any{map[string]any{"role": "user", "content": "hi"}}},
+			frames: []string{
+				"event: message_start\n" + `data: {"type":"message_start","message":{"id":"msg_1","role":"assistant"}}`,
+				"event: content_block_delta\n" + `data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial"}}`,
+				"event: error\n" + `data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+			},
+			wantStatus: http.StatusServiceUnavailable,
+			wantBody:   `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var streams []any
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				var parsed map[string]any
+				_ = json.Unmarshal(raw, &parsed)
+				streams = append(streams, parsed["stream"])
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.WriteHeader(http.StatusOK)
+				for _, f := range tc.frames {
+					fmt.Fprintf(w, "%s\n\n", f)
+				}
+			}))
+			defer server.Close()
+
+			step, reg := newForceStreamStep(t, server.URL, "1GiB")
+			recorder := httptest.NewRecorder()
+			reqCtx := &pipeline.RequestContext{
+				RequestID:        "req-midstream-error",
+				OriginalPath:     tc.path,
+				Model:            "m",
+				Stream:           false,
+				KVTransferParams: map[string]any{},
+				Body:             tc.body,
+				ResponseWriter:   recorder,
+			}
+
+			err := step.Execute(context.Background(), reqCtx)
+			var streamed *pipeline.UpstreamStreamedError
+			require.True(t, errors.As(err, &streamed), "a forwarded error must report UpstreamStreamedError, got %v", err)
+			require.Equal(t, tc.wantStatus, streamed.StatusCode)
+
+			result := recorder.Result()
+			require.Equal(t, tc.wantStatus, result.StatusCode)
+			require.Equal(t, "application/json", result.Header.Get("Content-Type"))
+			respBody, _ := io.ReadAll(result.Body)
+			require.JSONEq(t, tc.wantBody, string(respBody), "the pod's error envelope reaches the client")
+			require.Equal(t, []any{true}, streams, "the pod answered; there is no fallback re-send")
+			require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorUpstream), 1e-9)
+			require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+			require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnreadable), 1e-9)
+			require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released after the error")
+		})
+	}
+}
+
+// TestForceStream_MidStreamErrorSpentHandoff_ForwardsEnvelope covers a mid-stream
+// error on a NIXL path whose block handoff the forced attempt already spent. The
+// error is forwarded rather than a fallback, so the spent-handoff suppression does
+// not apply and the client gets the pod's error, not a generic 502.
+func TestForceStream_MidStreamErrorSpentHandoff_ForwardsEnvelope(t *testing.T) {
+	const envelope = `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "event: error\ndata: "+envelope+"\n\n")
+	}))
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "1GiB",
+		ParamKVConnector:               kv.NIXL,
+	})
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-midstream-error-spent",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        "m",
+		Stream:       false,
+		KVTransferParams: map[string]any{
+			reqcommon.FieldRemoteBlockIDs: []any{1, 2},
+			reqcommon.FieldRemoteEngineID: "prefill-pod-a",
+		},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_tokens": 16,
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	err = step.(*DecodeStep).Execute(context.Background(), reqCtx)
+	var streamed *pipeline.UpstreamStreamedError
+	require.True(t, errors.As(err, &streamed), "the pod's error is forwarded, got %v", err)
+	require.Equal(t, http.StatusServiceUnavailable, recorder.Result().StatusCode)
+	respBody, _ := io.ReadAll(recorder.Result().Body)
+	require.JSONEq(t, envelope, string(respBody))
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultErrorUpstream), 1e-9)
+}
+
+// TestUpstreamErrorStatus maps a mid-stream error frame to the HTTP status the
+// client gets: the OpenAI envelope's numeric code, the Responses error event's
+// string code, or the Anthropic error type. A frame that names no usable status
+// is a server error.
+func TestUpstreamErrorStatus(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame string
+		want  int
+	}{
+		{"openai numeric code", `{"error":{"message":"m","type":"BadRequestError","code":400}}`, http.StatusBadRequest},
+		{"openai 5xx code", `{"error":{"message":"m","type":"InternalServerError","code":500}}`, http.StatusInternalServerError},
+		{"openai code out of range", `{"error":{"message":"m","code":200}}`, http.StatusInternalServerError},
+		{"openai no code", `{"error":{"message":"m"}}`, http.StatusInternalServerError},
+		{"responses string code", `{"type":"error","code":"server_error","message":"m"}`, http.StatusInternalServerError},
+		{"anthropic overloaded", `{"type":"error","error":{"type":"overloaded_error","message":"m"}}`, http.StatusServiceUnavailable},
+		{"anthropic rate limit", `{"type":"error","error":{"type":"rate_limit_error","message":"m"}}`, http.StatusTooManyRequests},
+		{"anthropic invalid request", `{"type":"error","error":{"type":"invalid_request_error","message":"m"}}`, http.StatusBadRequest},
+		{"anthropic not found", `{"type":"error","error":{"type":"not_found_error","message":"m"}}`, http.StatusNotFound},
+		{"anthropic api error", `{"type":"error","error":{"type":"api_error","message":"m"}}`, http.StatusInternalServerError},
+		{"anthropic unknown type", `{"type":"error","error":{"type":"some_new_error","message":"m"}}`, http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var f map[string]any
+			require.NoError(t, json.Unmarshal([]byte(tc.frame), &f))
+			require.Equal(t, tc.want, upstreamErrorStatus(f))
+		})
+	}
+}
+
+// An error frame is recognised on every shape, in both forms vLLM streams: the
+// OpenAI envelope with a top-level error object (chat, text, generate) and a typed
+// error event (Responses, Messages). A data frame that is neither is not an error.
+func TestIsErrorFrame(t *testing.T) {
+	tests := []struct {
+		name  string
+		frame string
+		want  bool
+	}{
+		{"openai envelope", `{"error":{"message":"m","type":"InternalServerError","code":500}}`, true},
+		{"responses error event", `{"type":"error","code":"server_error","message":"m"}`, true},
+		{"anthropic error event", `{"type":"error","error":{"type":"overloaded_error","message":"m"}}`, true},
+		{"chat chunk", `{"id":"c","choices":[{"index":0,"delta":{"content":"hi"}}]}`, false},
+		{"responses failed event", `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_error"}}}`, false},
+		{"null error field", `{"id":"c","choices":[],"error":null}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, isErrorFrame(frame(t, tc.frame)))
+		})
+	}
+}
