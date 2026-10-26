@@ -244,6 +244,12 @@ func (r *sseReassembler) addResponses(frame map[string]any) {
 // falls back and keeps the dropped block); message_delta carries the terminal
 // stop_reason and authoritative usage; message_stop ends the stream. terminated()
 // reports true once message_delta or message_stop is seen, since there is no [DONE].
+//
+// The fold ignores the content block index and emits one text block, so it
+// assumes the reply has a single text block. vLLM opens a new text block only
+// after a block of another type, which is non-text and already lossy, so the
+// assumption holds for vLLM; a server that splits text across several blocks
+// would get them concatenated into one.
 func (r *sseReassembler) addMessages(frame map[string]any) {
 	switch frame[reqcommon.FieldType] {
 	case messageEventStart:
