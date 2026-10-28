@@ -975,12 +975,16 @@ func TestForceStream_FallbackBudget(t *testing.T) {
 	// all of it so the request under test cannot fit.
 	step, reg := newForceStreamStep(t, server.URL, strconv.FormatInt(reserved, 10))
 	require.True(t, step.budget.tryReserve(reserved), "pre-reserve the whole budget")
+	require.InDelta(t, float64(reserved), forceStreamGauge(t, reg), 1e-9, "the gauge reports the live reservation")
 
 	require.NoError(t, step.Execute(context.Background(), reqCtx))
 
 	require.Equal(t, false, upstreamBody["stream"], "fallback must send the client's non-streaming body unchanged")
 	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackBudget), 1e-9)
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
+
+	step.budget.release(reserved)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "the gauge drops by the released reservation")
 }
 
 // TestForceStream_NoTokenLimit_Forced verifies a request with no declared output
