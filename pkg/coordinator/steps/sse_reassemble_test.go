@@ -414,7 +414,7 @@ func TestSSEReassemble_Messages(t *testing.T) {
 	require.Equal(t, "text", block["type"])
 	require.Equal(t, "Hello world", block["text"])
 
-	// Usage is trimmed to input/output tokens, matching the non-streaming body.
+	// Usage is the message_delta block, which carries the final output_tokens.
 	usage := got["usage"].(map[string]any)
 	require.EqualValues(t, 25, usage["input_tokens"])
 	require.EqualValues(t, 2, usage["output_tokens"])
