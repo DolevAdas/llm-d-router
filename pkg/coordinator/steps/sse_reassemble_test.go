@@ -395,7 +395,7 @@ func TestSSEReassemble_Messages(t *testing.T) {
 	r.add(frame(t, `{"type":"message_start","message":{"id":"msg_1","model":"claude","role":"assistant","usage":{"input_tokens":25}}}`))
 	r.add(frame(t, `{"type":"content_block_delta","delta":{"type":"text_delta","text":"Hello"}}`))
 	r.add(frame(t, `{"type":"content_block_delta","delta":{"type":"text_delta","text":" world"}}`))
-	r.add(frame(t, `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":25,"output_tokens":2}}`))
+	r.add(frame(t, `{"type":"message_delta","delta":{"stop_reason":"stop_sequence","stop_sequence":"</done>"},"usage":{"input_tokens":25,"output_tokens":2}}`))
 	r.add(frame(t, `{"type":"message_stop"}`))
 
 	require.True(t, r.terminated())
@@ -406,7 +406,8 @@ func TestSSEReassemble_Messages(t *testing.T) {
 	require.Equal(t, "message", got["type"])
 	require.Equal(t, "assistant", got["role"])
 	require.Equal(t, "claude", got["model"])
-	require.Equal(t, "end_turn", got["stop_reason"])
+	require.Equal(t, "stop_sequence", got["stop_reason"])
+	require.Equal(t, "</done>", got["stop_sequence"])
 
 	content := got["content"].([]any)
 	require.Len(t, content, 1)
