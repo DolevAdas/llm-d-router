@@ -114,6 +114,17 @@ const (
 	RoleAssistant = "assistant"
 )
 
+// Choice fields of a Chat Completions or Completions response, streamed or not.
+// A non-streaming chat reply holds each choice's output under FieldMessage; a
+// streamed chunk holds the increment under FieldDelta.
+const (
+	FieldChoices      = "choices"
+	FieldIndex        = "index"
+	FieldFinishReason = "finish_reason"
+	FieldMessage      = "message"
+	FieldDelta        = "delta"
+)
+
 // Usage fields in a response body. Chat Completions and Completions report
 // prompt_tokens and completion_tokens with details under prompt_tokens_details;
 // Responses and Conversations report input_tokens and output_tokens with details

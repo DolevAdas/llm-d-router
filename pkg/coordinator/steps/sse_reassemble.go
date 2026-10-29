@@ -198,7 +198,7 @@ func (r *sseReassembler) add(frame map[string]any) {
 		return
 	}
 	r.captureMeta(frame)
-	if choices, ok := frame["choices"].([]any); ok {
+	if choices, ok := frame[reqcommon.FieldChoices].([]any); ok {
 		for _, c := range choices {
 			if choice, ok := c.(map[string]any); ok {
 				r.foldChoice(choice)
@@ -367,7 +367,7 @@ func (r *sseReassembler) choice(index int) *sseChoice {
 // surplus choices cannot grow the choice map past the reservation.
 func (r *sseReassembler) foldChoice(choice map[string]any) {
 	index := 0
-	if v := choice["index"]; v != nil {
+	if v := choice[reqcommon.FieldIndex]; v != nil {
 		n, err := reqcommon.NonNegativeInt(v)
 		if err != nil {
 			return
@@ -381,7 +381,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 
 	switch r.shape {
 	case sseShapeChat:
-		if delta, ok := choice["delta"].(map[string]any); ok {
+		if delta, ok := choice[reqcommon.FieldDelta].(map[string]any); ok {
 			if role, ok := delta[reqcommon.FieldRole].(string); ok && role != "" {
 				acc.role = role
 			}
@@ -413,7 +413,7 @@ func (r *sseReassembler) foldChoice(choice map[string]any) {
 		}
 	}
 
-	if fr, ok := choice["finish_reason"]; ok && fr != nil {
+	if fr, ok := choice[reqcommon.FieldFinishReason]; ok && fr != nil {
 		acc.finishReason = fr
 		acc.hasFinish = true
 	}
@@ -486,7 +486,7 @@ func (r *sseReassembler) result() map[string]any {
 	for _, idx := range indices {
 		choices = append(choices, r.resultChoice(r.choices[idx]))
 	}
-	out["choices"] = choices
+	out[reqcommon.FieldChoices] = choices
 
 	// The generate endpoint's non-streaming reply carries no usage block, so the
 	// forced reply drops any usage its stream reports. Chat and text non-streaming
@@ -596,13 +596,13 @@ func (r *sseReassembler) resultObject() string {
 
 func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
 	choice := map[string]any{
-		"index":    c.index,
-		"logprobs": nil,
+		reqcommon.FieldIndex: c.index,
+		"logprobs":           nil,
 	}
 	if c.hasFinish {
-		choice["finish_reason"] = c.finishReason
+		choice[reqcommon.FieldFinishReason] = c.finishReason
 	} else {
-		choice["finish_reason"] = nil
+		choice[reqcommon.FieldFinishReason] = nil
 	}
 
 	switch r.shape {
@@ -611,7 +611,7 @@ func (r *sseReassembler) resultChoice(c *sseChoice) map[string]any {
 		if role == "" {
 			role = reqcommon.RoleAssistant
 		}
-		choice["message"] = map[string]any{
+		choice[reqcommon.FieldMessage] = map[string]any{
 			reqcommon.FieldRole:    role,
 			reqcommon.FieldContent: c.content.String(),
 		}

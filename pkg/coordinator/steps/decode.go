@@ -108,10 +108,11 @@ func (s *DecodeStep) Execute(ctx context.Context, reqCtx *pipeline.RequestContex
 						return err
 					}
 					// The attempt failed with nothing written to the client. Falling back
-					// re-sends reqCtx.Body through the pass-through, but it still carries
-					// the prefiller's one-shot P2P block handoff the forced attempt already
-					// pulled; replaying spent blocks is unsafe, so such a request fails
-					// cleanly instead (nothing reached the client, so a 5xx is honest).
+					// re-sends reqCtx.Body through the pass-through, so the pod may run the
+					// request twice. The body still carries the prefiller's one-shot P2P
+					// block handoff the forced attempt already pulled; replaying spent
+					// blocks is unsafe, so such a request fails cleanly instead (nothing
+					// reached the client, so a 5xx is honest).
 					if spendsRemoteBlocks(reqCtx.Body) {
 						logger.Error(err, "force-stream failed and its KV block handoff is spent; not replaying")
 						return err

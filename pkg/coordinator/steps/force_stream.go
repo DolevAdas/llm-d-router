@@ -146,6 +146,9 @@ func isErrorFrame(frame map[string]any) bool {
 // The pod has answered the request, so the decode step forwards payload, the
 // frame as streamed, with status and does not fall back: a re-send would repeat
 // the request to the pod that just failed it, possibly for being overloaded.
+// payload is not re-enveloped, so the client gets the frame's own shape: the
+// OpenAI error envelope for chat, text, and generate, a type "error" event for
+// Responses and Messages.
 type forceStreamUpstreamError struct {
 	status  int
 	payload []byte
