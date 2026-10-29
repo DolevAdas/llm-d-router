@@ -186,6 +186,15 @@ func TestForceStreamLossy(t *testing.T) {
 	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"tools": []any{}}))
 	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{}))
 	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"logprobs": true}))
+
+	// A Messages request that turns thinking on streams thinking blocks the fold
+	// drops, so it is lossy. adaptive lets the model think too; disabled does not.
+	require.True(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": map[string]any{"type": "enabled", "budget_tokens": 1024}}))
+	require.True(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": map[string]any{"type": "adaptive"}}))
+	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": map[string]any{"type": "disabled"}}))
+	require.False(t, forceStreamLossy(sseShapeMessages, map[string]any{"thinking": nil}))
+	// thinking is a Messages field; chat turns reasoning on with its own fields.
+	require.False(t, forceStreamLossy(sseShapeChat, map[string]any{"thinking": map[string]any{"type": "enabled"}}))
 }
 
 // TestForceStreamLossy_RawMessageFields guards the production body shape: the
@@ -240,6 +249,8 @@ func TestForceStreamLossy_RawMessageFields(t *testing.T) {
 	// tools array is detected, a plain request is not.
 	require.True(t, forceStreamLossy(sseShapeMessages,
 		rawBody(t, `{"model":"m","stream":false,"tools":[{"name":"get_weather"}]}`)))
+	require.True(t, forceStreamLossy(sseShapeMessages,
+		rawBody(t, `{"model":"m","stream":false,"thinking":{"type":"enabled","budget_tokens":1024}}`)))
 	require.False(t, forceStreamLossy(sseShapeMessages,
 		rawBody(t, `{"model":"m","stream":false,"messages":[{"role":"user","content":"hi"}]}`)))
 }
@@ -1578,6 +1589,62 @@ func TestForceStream_LossyFrameSpentHandoff_SuppressesFallback(t *testing.T) {
 		"a suppressed request is not counted as a fallback")
 	require.InDelta(t, 0.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultForced), 1e-9)
 	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "reservation released on the error path")
+}
+
+// TestForceStream_MessagesThinkingSpentHandoff_PassesThrough covers a Messages
+// request that turns thinking on, on a NIXL path carrying a one-shot block
+// handoff. Its thinking blocks would make a forced attempt lossy, and the attempt
+// would spend the handoff so the fallback could not replay it. The request is
+// declined before any forced attempt and served by the pass-through.
+func TestForceStream_MessagesThinkingSpentHandoff_PassesThrough(t *testing.T) {
+	const passthroughReply = `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":"t"},{"type":"text","text":"hi"}]}`
+	var streams []any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		var parsed map[string]any
+		_ = json.Unmarshal(raw, &parsed)
+		streams = append(streams, parsed["stream"])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(passthroughReply))
+	}))
+	defer server.Close()
+
+	reg := prometheus.NewRegistry()
+	require.NoError(t, coordmetrics.Register(reg))
+	coordmetrics.Reset()
+	gwClient := gateway.New(config.GatewayConfig{Address: server.URL})
+	step, err := NewDecodeStep(gwClient, map[string]any{
+		ParamForceStream:               true,
+		ParamForceStreamBufferSize:     "1GiB",
+		ParamForceStreamMaxRequestSize: "1GiB",
+		ParamKVConnector:               kv.NIXL,
+	})
+	require.NoError(t, err)
+
+	recorder := httptest.NewRecorder()
+	reqCtx := &pipeline.RequestContext{
+		RequestID:    "req-thinking-spent",
+		OriginalPath: reqcommon.PathMessages,
+		Model:        "m",
+		Stream:       false,
+		KVTransferParams: map[string]any{
+			reqcommon.FieldRemoteBlockIDs: []any{1, 2},
+			reqcommon.FieldRemoteEngineID: "prefill-pod-a",
+		},
+		Body: map[string]any{
+			"model": "m", "stream": false, "max_tokens": 2048,
+			"thinking": json.RawMessage(`{"type":"enabled","budget_tokens":1024}`),
+			"messages": []any{map[string]any{"role": "user", "content": "hi"}},
+		},
+		ResponseWriter: recorder,
+	}
+
+	require.NoError(t, step.(*DecodeStep).Execute(context.Background(), reqCtx))
+	require.Equal(t, []any{false}, streams, "no forced attempt; the pass-through serves the request once")
+	respBody, _ := io.ReadAll(recorder.Result().Body)
+	require.JSONEq(t, passthroughReply, string(respBody), "the thinking block reaches the client")
+	require.InDelta(t, 1.0, forceStreamCount(t, reg, coordmetrics.ForceStreamResultFallbackUnsupported), 1e-9)
+	require.InDelta(t, 0.0, forceStreamGauge(t, reg), 1e-9, "nothing was reserved")
 }
 
 // TestSpendsRemoteBlocks covers the one-shot P2P handoff detector that gates the

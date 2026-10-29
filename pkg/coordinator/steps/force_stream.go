@@ -359,18 +359,28 @@ func (s *DecodeStep) executeForceStream(ctx context.Context, logger logr.Logger,
 	return writeForcedResponse(logger, reqCtx, writer, finalize, reassembler)
 }
 
+// thinkingTypeDisabled is the Anthropic Messages thinking.type that turns
+// thinking off; enabled and adaptive both let the model emit thinking blocks.
+const thinkingTypeDisabled = "disabled"
+
 // forceStreamLossy reports whether force-streaming would drop fields the
 // reassembler does not fold. The chat and text shapes fold only generated text,
 // so a request that may produce tool calls, function calls, logprobs, or chat
 // reasoning content takes the pass-through to keep them. The Messages shape folds
-// only text content blocks, so a request declaring tools takes the pass-through to
-// keep tool_use blocks (a server-side tool_use or thinking block it does not declare
-// is caught on the frame instead). The responses shape emits the upstream object
-// verbatim (keeping those fields) and generate has none, so neither is lossy.
+// only text content blocks, so a request declaring tools or turning thinking on
+// takes the pass-through to keep its tool_use or thinking blocks (a server-side
+// block the request does not declare is caught on the frame instead). The responses
+// shape emits the upstream object verbatim (keeping those fields) and generate has
+// none, so neither is lossy.
 func forceStreamLossy(shape sseShape, body map[string]any) bool {
 	if shape == sseShapeMessages {
 		if tools, ok := reqcommon.FieldValue(body, reqcommon.FieldTools); ok {
 			if arr, ok := tools.([]any); ok && len(arr) > 0 {
+				return true
+			}
+		}
+		if thinking, ok := reqcommon.FieldValue(body, reqcommon.FieldThinking); ok {
+			if cfg, ok := thinking.(map[string]any); ok && cfg[reqcommon.FieldType] != thinkingTypeDisabled {
 				return true
 			}
 		}
